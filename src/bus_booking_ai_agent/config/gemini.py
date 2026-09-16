@@ -15,4 +15,4 @@ if not api_key:
 client = genai.Client(api_key=api_key)
 
 # Keep the existing model
-MODEL = "gemini-3.5-flash"
+MODEL = "gemini-3.6-flash"
