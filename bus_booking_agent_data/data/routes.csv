@@ -1,0 +1,6 @@
+id,origin,destination,distance_km,estimated_duration_minutes,is_active,created_at
+1729efdd-e340-5069-a28b-05bee148da05,Hyderabad,Bangalore,570,600,true,2025-01-15T09:00:00+05:30
+e6f6962a-8ff5-5bd8-974a-a4cadfcf2d7e,Hyderabad,Chennai,630,660,true,2025-01-15T09:00:00+05:30
+8a7165f3-11ee-5e56-b09e-dd3dad561be1,Bangalore,Chennai,345,360,true,2025-01-15T09:00:00+05:30
+94264b5e-2735-5193-a3a2-e07b8e3856a1,Hyderabad,Vijayawada,275,300,true,2025-01-15T09:00:00+05:30
+efca8a0e-bd1f-5b43-a798-3c0a7d610765,Bangalore,Hyderabad,570,600,true,2025-01-15T09:00:00+05:30
