@@ -182,6 +182,118 @@ create table booking_seats (
     constraint booking_seats_booking_id_seat_id_key unique (booking_id, seat_id)
 );
 
+
+-- ============================================================
+-- HOLD STATUS
+-- ============================================================
+
+CREATE TYPE hold_status AS ENUM (
+    'ACTIVE',
+    'RELEASED',
+    'EXPIRED',
+    'CONVERTED'
+);
+
+
+-- ============================================================
+-- SEAT HOLDS
+-- ============================================================
+
+CREATE TABLE seat_holds (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    -- Real Supabase Auth user UUID.
+    -- This is supplied by the authenticated backend context,
+    -- never by Gemini or the browser request body.
+    auth_user_id UUID NOT NULL,
+
+    -- Scheduled bus journey
+    schedule_id UUID NOT NULL,
+
+    -- Physical seat on the bus
+    seat_id UUID NOT NULL,
+
+    -- Journey segment
+    boarding_stop_id UUID NOT NULL,
+    dropping_stop_id UUID NOT NULL,
+
+    -- Validated route-stop sequence numbers.
+    -- These are derived from the database during hold creation.
+    boarding_sequence INTEGER NOT NULL,
+    dropping_sequence INTEGER NOT NULL,
+
+    -- Hold lifecycle
+    status hold_status NOT NULL DEFAULT 'ACTIVE',
+
+    -- Hold expiration
+    expires_at TIMESTAMPTZ NOT NULL,
+
+    -- Timestamps
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    released_at TIMESTAMPTZ,
+    converted_at TIMESTAMPTZ,
+
+    -- Set when the hold becomes a confirmed booking.
+    booking_id UUID,
+
+    -- ========================================================
+    -- CHECK CONSTRAINTS
+    -- ========================================================
+
+    CONSTRAINT seat_holds_valid_sequence
+        CHECK (
+            boarding_sequence < dropping_sequence
+        ),
+
+    CONSTRAINT seat_holds_valid_expiration
+        CHECK (
+            expires_at > created_at
+        ),
+
+    CONSTRAINT seat_holds_released_timestamp
+        CHECK (
+            status <> 'RELEASED'
+            OR released_at IS NOT NULL
+        ),
+
+    CONSTRAINT seat_holds_converted_timestamp
+        CHECK (
+            status <> 'CONVERTED'
+            OR converted_at IS NOT NULL
+        ),
+
+    CONSTRAINT seat_holds_converted_booking
+        CHECK (
+            status <> 'CONVERTED'
+            OR booking_id IS NOT NULL
+        ),
+
+    -- ========================================================
+    -- FOREIGN KEYS
+    -- ========================================================
+
+    CONSTRAINT seat_holds_schedule_fk
+        FOREIGN KEY (schedule_id)
+        REFERENCES schedules(id),
+
+    CONSTRAINT seat_holds_seat_fk
+        FOREIGN KEY (seat_id)
+        REFERENCES bus_seats(id),
+
+    CONSTRAINT seat_holds_boarding_stop_fk
+        FOREIGN KEY (boarding_stop_id)
+        REFERENCES route_stops(id),
+
+    CONSTRAINT seat_holds_dropping_stop_fk
+        FOREIGN KEY (dropping_stop_id)
+        REFERENCES route_stops(id),
+
+    CONSTRAINT seat_holds_booking_fk
+        FOREIGN KEY (booking_id)
+        REFERENCES bookings(id)
+);
+
+
 -- =============================================================================
 -- INDEXES  (for the read-only MCP tools: search_buses, get_bus_details,
 -- check_seat_availability, get_booking)
@@ -208,3 +320,24 @@ create index idx_bookings_status on bookings (status);
 
 create index idx_booking_seats_booking_id on booking_seats (booking_id);
 create index idx_booking_seats_seat_id on booking_seats (seat_id);
+
+
+CREATE INDEX idx_seat_holds_schedule_seat
+    ON seat_holds(schedule_id, seat_id);
+
+CREATE INDEX idx_seat_holds_user
+    ON seat_holds(auth_user_id);
+
+CREATE INDEX idx_seat_holds_status_expiration
+    ON seat_holds(status, expires_at);
+
+CREATE INDEX idx_seat_holds_schedule_segment
+    ON seat_holds(
+        schedule_id,
+        seat_id,
+        boarding_sequence,
+        dropping_sequence
+    );
+
+CREATE INDEX idx_seat_holds_booking
+    ON seat_holds(booking_id);
