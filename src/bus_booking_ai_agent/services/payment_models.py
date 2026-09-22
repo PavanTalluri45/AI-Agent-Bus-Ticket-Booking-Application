@@ -7,10 +7,6 @@ from pydantic import BaseModel, Field
 class Payment(BaseModel):
     """
     Represents a payment tracked by the application.
-
-    The payment provider is an external system.
-    This model represents the payment information
-    maintained by our application.
     """
 
     id: UUID
@@ -34,8 +30,36 @@ class CreatePaymentRequest(BaseModel):
     Request to initiate payment for an existing booking.
 
     The client provides only the booking ID.
-    The backend determines the amount, currency,
-    authenticated user, and payment state.
+
+    The backend determines:
+    - amount
+    - currency
+    - authenticated user
+    - payment state
     """
 
     booking_id: UUID
+
+
+class VerifyPaymentRequest(BaseModel):
+    """
+    Razorpay payment verification request.
+
+    The frontend sends the values returned by Razorpay.
+    The backend verifies them against the stored payment
+    and the Razorpay signature.
+    """
+
+    payment_id: UUID
+
+    razorpay_payment_id: str = Field(
+        min_length=1
+    )
+
+    razorpay_order_id: str = Field(
+        min_length=1
+    )
+
+    razorpay_signature: str = Field(
+        min_length=1
+    )

@@ -7,6 +7,11 @@ from bus_booking_ai_agent.auth.models import AuthenticatedUser
 from bus_booking_ai_agent.config.database import engine
 
 
+# ============================================================
+# Exceptions
+# ============================================================
+
+
 class BookingError(Exception):
     """Base exception for booking service failures."""
 
@@ -36,11 +41,16 @@ class HoldNotActiveError(BookingError):
 
 
 class ScheduleUnavailableError(BookingError):
-    """Raised when the schedule cannot be booked."""
+    """Raised when the schedule is no longer available."""
 
 
 class BookingCreationError(BookingError):
-    """Raised when booking creation fails."""
+    """Raised when booking creation cannot be completed."""
+
+
+# ============================================================
+# SQL: Load and validate the hold
+# ============================================================
 
 
 CREATE_BOOKING_FROM_HOLD_SQL = """
@@ -87,6 +97,42 @@ FOR UPDATE OF h;
 """
 
 
+# ============================================================
+# SQL: Revalidate confirmed booking conflicts
+# ============================================================
+
+
+REVALIDATE_CONFIRMED_BOOKING_SQL = """
+SELECT 1
+
+FROM booking_seats bs
+
+JOIN bookings b
+    ON b.id = bs.booking_id
+
+JOIN route_stops boarding
+    ON boarding.id = b.boarding_stop_id
+
+JOIN route_stops dropping
+    ON dropping.id = b.dropping_stop_id
+
+WHERE
+    b.schedule_id = :schedule_id
+    AND bs.seat_id = :seat_id
+    AND b.status = 'CONFIRMED'
+
+    AND boarding.sequence_number < :dropping_sequence
+    AND dropping.sequence_number > :boarding_sequence
+
+LIMIT 1;
+"""
+
+
+# ============================================================
+# SQL: Create payment-pending booking
+# ============================================================
+
+
 CREATE_BOOKING_SQL = """
 INSERT INTO bookings (
     id,
@@ -99,6 +145,7 @@ INSERT INTO bookings (
     total_amount,
     status
 )
+
 VALUES (
     :booking_id,
     :booking_reference,
@@ -110,6 +157,7 @@ VALUES (
     :total_amount,
     'PAYMENT_PENDING'
 )
+
 RETURNING
     id,
     booking_reference,
@@ -126,6 +174,11 @@ RETURNING
 """
 
 
+# ============================================================
+# SQL: Create booking seat
+# ============================================================
+
+
 CREATE_BOOKING_SEAT_SQL = """
 INSERT INTO booking_seats (
     id,
@@ -134,8 +187,9 @@ INSERT INTO booking_seats (
     passenger_name,
     passenger_age,
     passenger_gender,
-    seat_fare
+    fare
 )
+
 VALUES (
     :booking_seat_id,
     :booking_id,
@@ -145,6 +199,7 @@ VALUES (
     :passenger_gender,
     :seat_fare
 )
+
 RETURNING
     id,
     booking_id,
@@ -152,18 +207,30 @@ RETURNING
     passenger_name,
     passenger_age,
     passenger_gender,
-    seat_fare,
+    fare,
     created_at;
 """
 
 
+# ============================================================
+# Booking reference
+# ============================================================
+
+
 def _generate_booking_reference() -> str:
     """
-    Generate a unique application booking reference.
+    Generate a unique booking reference.
 
-    The database unique constraint remains the final authority.
+    The database unique constraint remains the final
+    authority for uniqueness.
     """
+
     return f"BUS-{uuid4().hex[:10].upper()}"
+
+
+# ============================================================
+# Create PAYMENT_PENDING booking
+# ============================================================
 
 
 def create_payment_pending_booking(
@@ -176,67 +243,152 @@ def create_payment_pending_booking(
     """
     Create a PAYMENT_PENDING booking from an active seat hold.
 
-    The authenticated user's UUID comes from Supabase Auth.
-    Fare and booking amount come from the database.
+    Important rules:
+
+    - The authenticated user's ID comes from Supabase Auth.
+    - The hold must belong to the authenticated user.
+    - The hold must still be active.
+    - The hold must not be expired.
+    - The schedule must still be scheduled.
+    - The seat must still be active.
+    - Confirmed booking conflicts are revalidated.
+    - Fare is retrieved from the database.
+    - Booking amount is calculated server-side.
+    - Booking and booking_seat are created in one transaction.
+    - The hold remains ACTIVE until payment succeeds.
     """
 
     with engine.begin() as connection:
 
-        hold = connection.execute(
+        # ----------------------------------------------------
+        # 1. Load the hold and related booking information
+        # ----------------------------------------------------
+
+        hold_result = connection.execute(
             text(CREATE_BOOKING_FROM_HOLD_SQL),
             {
                 "hold_id": hold_id,
             },
-        ).mappings().first()
+        )
+
+        hold = hold_result.mappings().first()
 
         if hold is None:
             raise HoldNotFoundError(
                 "The requested hold was not found."
             )
 
+        # ----------------------------------------------------
+        # 2. Verify hold ownership
+        # ----------------------------------------------------
+
         if hold["auth_user_id"] != current_user.id:
             raise HoldOwnershipError(
-                "The requested hold does not belong to the authenticated user."
+                "The requested hold does not belong "
+                "to the authenticated user."
             )
 
-        if hold["status"] != "ACTIVE":
+        # ----------------------------------------------------
+        # 3. Verify hold status
+        # ----------------------------------------------------
+
+        if hold["hold_status"] != "ACTIVE":
             raise HoldNotActiveError(
                 "The hold is no longer active."
             )
 
-        if hold["expires_at"] <= connection.execute(
+        # ----------------------------------------------------
+        # 4. Verify hold expiration
+        # ----------------------------------------------------
+
+        current_database_time = connection.execute(
             text("SELECT CURRENT_TIMESTAMP")
-        ).scalar_one():
+        ).scalar_one()
+
+        if hold["expires_at"] <= current_database_time:
             raise HoldExpiredError(
                 "The hold has expired."
             )
 
+        # ----------------------------------------------------
+        # 5. Verify schedule status
+        # ----------------------------------------------------
+
         if hold["schedule_status"] != "SCHEDULED":
             raise ScheduleUnavailableError(
-                "The scheduled journey is no longer available for booking."
+                "The scheduled journey is no longer "
+                "available for booking."
             )
+
+        # ----------------------------------------------------
+        # 6. Verify seat status
+        # ----------------------------------------------------
 
         if not hold["seat_active"]:
             raise BookingCreationError(
                 "The selected seat is no longer active."
             )
 
+        # ----------------------------------------------------
+        # 7. Revalidate confirmed booking conflicts
+        # ----------------------------------------------------
+
+        conflicting_booking = connection.execute(
+            text(REVALIDATE_CONFIRMED_BOOKING_SQL),
+            {
+                "schedule_id": hold["schedule_id"],
+                "seat_id": hold["seat_id"],
+                "boarding_sequence": hold["boarding_sequence"],
+                "dropping_sequence": hold["dropping_sequence"],
+            },
+        ).first()
+
+        if conflicting_booking is not None:
+            raise BookingCreationError(
+                "The selected seat is no longer available "
+                "for this journey segment."
+            )
+
+        # ----------------------------------------------------
+        # 8. Verify fare exists
+        # ----------------------------------------------------
+
         if hold["fare_amount"] is None:
             raise BookingCreationError(
-                "No active fare exists for the selected journey segment."
+                "No active fare exists for the selected "
+                "journey segment."
             )
+
+        # ----------------------------------------------------
+        # 9. Verify currency
+        # ----------------------------------------------------
 
         if hold["fare_currency"] != "INR":
             raise BookingCreationError(
                 "Unsupported fare currency."
             )
 
-        total_amount = Decimal(str(hold["fare_amount"]))
+        # ----------------------------------------------------
+        # 10. Calculate booking amount server-side
+        # ----------------------------------------------------
+
+        total_amount = Decimal(
+            str(hold["fare_amount"])
+        )
+
+        # ----------------------------------------------------
+        # 11. Generate booking identifiers
+        # ----------------------------------------------------
 
         booking_id = uuid4()
+
         booking_reference = _generate_booking_reference()
 
-        booking = connection.execute(
+        # ----------------------------------------------------
+        # 12. Create PAYMENT_PENDING booking
+        # ----------------------------------------------------
+
+        booking_result = connection.execute(
             text(CREATE_BOOKING_SQL),
             {
                 "booking_id": booking_id,
@@ -248,9 +400,15 @@ def create_payment_pending_booking(
                 "passenger_count": 1,
                 "total_amount": total_amount,
             },
-        ).mappings().one()
+        )
 
-        booking_seat = connection.execute(
+        booking = booking_result.mappings().one()
+
+        # ----------------------------------------------------
+        # 13. Create booking seat
+        # ----------------------------------------------------
+
+        booking_seat_result = connection.execute(
             text(CREATE_BOOKING_SEAT_SQL),
             {
                 "booking_seat_id": uuid4(),
@@ -261,7 +419,13 @@ def create_payment_pending_booking(
                 "passenger_gender": passenger_gender,
                 "seat_fare": total_amount,
             },
-        ).mappings().one()
+        )
+
+        booking_seat = booking_seat_result.mappings().one()
+
+        # ----------------------------------------------------
+        # 14. Return booking information
+        # ----------------------------------------------------
 
         return {
             "booking": dict(booking),
