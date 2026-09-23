@@ -1,3 +1,6 @@
+from datetime import date
+from uuid import UUID
+
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
@@ -17,6 +20,7 @@ from bus_booking_ai_agent.phase_03_mcp.tools.check_seat_availability import (
     check_seat_availability,
 )
 
+
 mcp = MCPServer("Bus Booking MCP Server")
 
 
@@ -34,7 +38,7 @@ def search_buses_tool(
     request = SearchBusesInput(
         origin=origin,
         destination=destination,
-        travel_date=travel_date,
+        travel_date=date.fromisoformat(travel_date),
     )
 
     return search_buses(request)
@@ -49,7 +53,7 @@ def get_bus_details_tool(
     """
 
     request = GetBusDetailsInput(
-        schedule_id=schedule_id,
+        schedule_id=UUID(schedule_id),
     )
 
     return get_bus_details(request)
@@ -67,9 +71,9 @@ def check_seat_availability_tool(
     """
 
     request = CheckSeatAvailabilityInput(
-        schedule_id=schedule_id,
-        boarding_stop_id=boarding_stop_id,
-        dropping_stop_id=dropping_stop_id,
+        schedule_id=UUID(schedule_id),
+        boarding_stop_id=UUID(boarding_stop_id),
+        dropping_stop_id=UUID(dropping_stop_id),
     )
 
     try:
@@ -77,3 +81,7 @@ def check_seat_availability_tool(
 
     except InvalidJourneySegmentError as error:
         raise ToolError(str(error)) from error
+
+
+if __name__ == "__main__":
+    mcp.run()
