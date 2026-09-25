@@ -5,22 +5,23 @@ from fastapi.security import (
 )
 
 from .models import AuthenticatedUser
-from .verifier import get_supabase_user
+from .verifier import authenticate_supabase_token
 
 
-_bearer_scheme = HTTPBearer(
-    auto_error=False
+bearer_scheme = HTTPBearer(
+    auto_error=False,
 )
 
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(
-        _bearer_scheme
+        bearer_scheme
     ),
 ) -> AuthenticatedUser:
     """
-    FastAPI dependency that returns the currently
-    authenticated Supabase user.
+    FastAPI dependency that returns the authenticated Supabase user.
+
+    The user identity comes only from the Supabase access token.
     """
 
     if credentials is None:
@@ -29,20 +30,6 @@ async def get_current_user(
             detail="Authentication required.",
         )
 
-    if credentials.scheme.lower() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required.",
-        )
-
-    access_token = credentials.credentials.strip()
-
-    if not access_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required.",
-        )
-
-    return await get_supabase_user(
-        access_token
+    return await authenticate_supabase_token(
+        credentials.credentials
     )
