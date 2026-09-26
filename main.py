@@ -1,4 +1,13 @@
 from fastapi import Depends, FastAPI
+from pydantic import BaseModel, Field
+
+from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
+    run_agent,
+)
+
+from bus_booking_ai_agent.phase_05_memory.memory_service import (
+    save_memory,
+)
 
 from bus_booking_ai_agent.auth import (
     AuthenticatedUser,
@@ -363,3 +372,75 @@ async def verify_payment_endpoint(
             "success": False,
             "error": str(error),
         }
+
+# ============================================================
+# Agent Chat
+# ============================================================
+
+
+class AgentChatRequest(BaseModel):
+    message: str = Field(min_length=1)
+    conversation_id: str = Field(min_length=1)
+
+
+class UpdateMemoryRequest(BaseModel):
+    memory_type: str = Field(min_length=1)
+    memory_key: str = Field(min_length=1)
+    memory_value: str = Field(min_length=1)
+
+
+@app.post("/api/v1/chat")
+def chat_with_agent(
+    request: AgentChatRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Run the bus-booking agent for the authenticated user.
+
+    The client supplies a conversation identifier, but never supplies
+    the authenticated user's UUID. The server namespaces the LangGraph
+    thread with the authenticated Supabase user ID.
+    """
+    thread_id = f"{current_user.id}:{request.conversation_id}"
+
+    result = run_agent(
+        current_user=current_user,
+        user_message=request.message,
+        thread_id=thread_id,
+    )
+
+    return {
+        "success": True,
+        "conversation_id": request.conversation_id,
+        "response": result["final_response"],
+    }
+
+# ============================================================
+# Memory: Update User Memory
+# ============================================================
+
+
+@app.post("/api/v1/memory")
+async def update_user_memory(
+    request: UpdateMemoryRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Create or update a memory for the authenticated user.
+
+    The client never supplies the user ID.
+    The authenticated Supabase user ID is used as the memory owner.
+    """
+
+    memory = save_memory(
+        user_id=str(current_user.id),
+        memory_type=request.memory_type,
+        memory_key=request.memory_key,
+        memory_value=request.memory_value,
+    )
+
+    return {
+        "success": True,
+        "memory": memory,
+    }
+

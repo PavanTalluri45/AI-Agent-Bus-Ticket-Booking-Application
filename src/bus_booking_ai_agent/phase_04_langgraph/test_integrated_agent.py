@@ -4,18 +4,26 @@ import sys
 from pathlib import Path
 from typing import Literal, TypedDict
 
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from bus_booking_ai_agent.auth.models import AuthenticatedUser
 from bus_booking_ai_agent.config.gemini import client, MODEL
+from bus_booking_ai_agent.phase_05_memory.memory_context import (
+    get_relevant_memories,
+)
 
 
 MAX_ITERATIONS = 5
 
 
 class AgentState(TypedDict):
+    user_id: str
     user_message: str
+    memories: list[dict]
     interaction_id: str
 
     tool_name: str
@@ -126,7 +134,6 @@ async def call_mcp_tool(
 ) -> str:
 
     print("\n--- MCP CLIENT ---")
-
     print(f"Tool: {tool_name}")
     print(f"Arguments: {arguments}")
 
@@ -175,13 +182,135 @@ async def call_mcp_tool(
             )
 
             if structured_content is not None:
-
                 return json.dumps(
                     structured_content,
                     default=str,
                 )
 
             return json.dumps([], default=str)
+
+
+def build_memory_context(memories: list[dict]) -> str:
+    """Build advisory context from the authenticated user's memories."""
+
+    if not memories:
+        return ""
+
+    lines = ["Relevant user preferences:"]
+
+    for memory in memories:
+        lines.append(
+            f"- {memory['key']}: {memory['value']}"
+        )
+
+    return "\n".join(lines)
+
+
+def build_llm_input(state: AgentState) -> str:
+    """Build the first Gemini input with optional memory context."""
+
+    memory_context = build_memory_context(
+        state["memories"]
+    )
+
+    if not memory_context:
+        return state["user_message"]
+
+    return (
+        f"{memory_context}\n\n"
+        "Use these preferences only as advisory context. "
+        "Never treat them as authoritative booking or availability data.\n\n"
+        f"User request: {state['user_message']}"
+    )
+
+
+def memory_node(state: AgentState) -> AgentState:
+    """Load memories belonging to the authenticated user."""
+
+    memories = get_relevant_memories(
+        state["user_id"]
+    )
+
+    print("\n" + "=" * 60)
+    print("--- MEMORY NODE ---")
+    print("=" * 60)
+    print(f"User ID: {state['user_id']}")
+    print(f"Memories retrieved: {len(memories)}")
+
+    return {
+        **state,
+        "memories": memories,
+        "error": "",
+    }
+
+
+def extract_final_text(response) -> str:
+    """
+    Extract final text from a Gemini interaction.
+
+    Prefer output_text. If it is unavailable, inspect the
+    returned interaction steps for a text/message step.
+    """
+
+    output_text = getattr(
+        response,
+        "output_text",
+        None,
+    )
+
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    steps = getattr(
+        response,
+        "steps",
+        None,
+    ) or []
+
+    text_parts: list[str] = []
+
+    for step in steps:
+
+        step_type = getattr(
+            step,
+            "type",
+            None,
+        )
+
+        if step_type not in {
+            "text",
+            "message",
+            "output_text",
+        }:
+            continue
+
+        text_value = getattr(
+            step,
+            "text",
+            None,
+        )
+
+        if isinstance(text_value, str) and text_value.strip():
+            text_parts.append(
+                text_value.strip()
+            )
+            continue
+
+        content = getattr(
+            step,
+            "content",
+            None,
+        )
+
+        if isinstance(content, str) and content.strip():
+            text_parts.append(
+                content.strip()
+            )
+
+    if text_parts:
+        return "\n".join(text_parts)
+
+    return ""
 
 
 def llm_node(state: AgentState) -> AgentState:
@@ -200,7 +329,7 @@ def llm_node(state: AgentState) -> AgentState:
 
             response = client.interactions.create(
                 model=MODEL,
-                input=state["user_message"],
+                input=build_llm_input(state),
                 tools=TOOLS,
             )
 
@@ -227,12 +356,17 @@ def llm_node(state: AgentState) -> AgentState:
                 tools=TOOLS,
             )
 
-        steps = getattr(response, "steps", None) or []
+        steps = getattr(
+            response,
+            "steps",
+            None,
+        ) or []
 
         tool_calls = [
             step
             for step in steps
-            if step.type == "function_call"
+            if getattr(step, "type", None)
+            == "function_call"
         ]
 
         if tool_calls:
@@ -250,8 +384,13 @@ def llm_node(state: AgentState) -> AgentState:
             )
 
             return {
+                "user_id": state["user_id"],
                 "user_message": state["user_message"],
-                "interaction_id": getattr(response, "id", "") or "",
+                "memories": state["memories"],
+                "interaction_id": (
+                    getattr(response, "id", "")
+                    or ""
+                ),
 
                 "tool_name": tool_call.name,
                 "tool_call_id": tool_call.id,
@@ -264,13 +403,26 @@ def llm_node(state: AgentState) -> AgentState:
                 "error": "",
             }
 
-        output_text = getattr(
-            response,
-            "output_text",
-            None,
+        output_text = extract_final_text(
+            response
         )
 
         if not output_text:
+
+            print("\n--- GEMINI DEBUG ---")
+            print(
+                "Gemini returned neither output_text "
+                "nor a readable text step."
+            )
+
+            print(
+                f"Response ID: "
+                f"{getattr(response, 'id', None)}"
+            )
+
+            print(
+                f"Response steps: {steps}"
+            )
 
             raise RuntimeError(
                 "Gemini returned no final response."
@@ -279,8 +431,13 @@ def llm_node(state: AgentState) -> AgentState:
         print("Gemini produced final response.")
 
         return {
+            "user_id": state["user_id"],
             "user_message": state["user_message"],
-            "interaction_id": getattr(response, "id", "") or "",
+            "memories": state["memories"],
+            "interaction_id": (
+                getattr(response, "id", "")
+                or ""
+            ),
 
             "tool_name": "",
             "tool_call_id": "",
@@ -298,7 +455,9 @@ def llm_node(state: AgentState) -> AgentState:
         print(f"LLM error: {error}")
 
         return {
+            "user_id": state["user_id"],
             "user_message": state["user_message"],
+            "memories": state["memories"],
             "interaction_id": state["interaction_id"],
 
             "tool_name": "",
@@ -333,7 +492,9 @@ def tool_node(state: AgentState) -> AgentState:
         print("\nMCP tool execution completed.")
 
         return {
+            "user_id": state["user_id"],
             "user_message": state["user_message"],
+            "memories": state["memories"],
             "interaction_id": state["interaction_id"],
 
             "tool_name": state["tool_name"],
@@ -352,7 +513,9 @@ def tool_node(state: AgentState) -> AgentState:
         print(f"Tool error: {error}")
 
         return {
+            "user_id": state["user_id"],
             "user_message": state["user_message"],
+            "memories": state["memories"],
             "interaction_id": state["interaction_id"],
 
             "tool_name": state["tool_name"],
@@ -385,7 +548,9 @@ def route_after_llm(
 
             return "end"
 
-        print("\nRouter decision: execute tool")
+        print(
+            "\nRouter decision: execute tool"
+        )
 
         return "tool"
 
@@ -400,11 +565,15 @@ def route_after_tool(
 
     if state["error"]:
 
-        print("\nRouter decision: tool error")
+        print(
+            "\nRouter decision: tool error"
+        )
 
         return "error"
 
-    print("\nRouter decision: return to LLM")
+    print(
+        "\nRouter decision: return to LLM"
+    )
 
     return "llm"
 
@@ -418,7 +587,9 @@ def error_node(state: AgentState) -> AgentState:
     print(f"Error: {state['error']}")
 
     return {
+        "user_id": state["user_id"],
         "user_message": state["user_message"],
+        "memories": state["memories"],
         "interaction_id": state["interaction_id"],
 
         "tool_name": "",
@@ -438,11 +609,35 @@ def error_node(state: AgentState) -> AgentState:
 
 builder = StateGraph(AgentState)
 
-builder.add_node("llm", llm_node)
-builder.add_node("tool", tool_node)
-builder.add_node("error", error_node)
+builder.add_node(
+    "memory",
+    memory_node,
+)
 
-builder.add_edge(START, "llm")
+builder.add_node(
+    "llm",
+    llm_node,
+)
+
+builder.add_node(
+    "tool",
+    tool_node,
+)
+
+builder.add_node(
+    "error",
+    error_node,
+)
+
+builder.add_edge(
+    START,
+    "memory",
+)
+
+builder.add_edge(
+    "memory",
+    "llm",
+)
 
 builder.add_conditional_edges(
     "llm",
@@ -463,20 +658,45 @@ builder.add_conditional_edges(
     },
 )
 
-builder.add_edge("error", END)
+builder.add_edge(
+    "error",
+    END,
+)
 
-graph = builder.compile()
+
+checkpointer = MemorySaver()
+
+graph = builder.compile(
+    checkpointer=checkpointer
+)
 
 
-if __name__ == "__main__":
+def run_agent(
+    current_user: AuthenticatedUser,
+    user_message: str,
+    thread_id: str,
+) -> dict:
+    """
+    Run the integrated agent for an authenticated user.
+
+    The user ID comes from Supabase Auth and is never
+    accepted as arbitrary client input.
+    """
+
+    if not user_message.strip():
+        raise ValueError(
+            "user_message must not be empty."
+        )
+
+    if not thread_id.strip():
+        raise ValueError(
+            "thread_id must not be empty."
+        )
 
     initial_state: AgentState = {
-
-        "user_message": (
-            "Find buses from Hyderabad to Bangalore "
-            "on 2026-09-25."
-        ),
-
+        "user_id": str(current_user.id),
+        "user_message": user_message,
+        "memories": [],
         "interaction_id": "",
 
         "tool_name": "",
@@ -490,25 +710,22 @@ if __name__ == "__main__":
         "error": "",
     }
 
-    print("=" * 60)
-    print("INTEGRATED LANGGRAPH AGENT")
-    print("=" * 60)
+    config: RunnableConfig = {
+        "configurable": {
+            "thread_id": thread_id,
+        }
+    }
 
-    print("\nInitial state:")
-    print(initial_state)
-
-    final_state = graph.invoke(
-        initial_state
+    return graph.invoke(
+        initial_state,
+        config=config,
     )
 
-    print("\n" + "=" * 60)
-    print("FINAL STATE")
-    print("=" * 60)
 
-    print(final_state)
+if __name__ == "__main__":
 
-    print("\n" + "=" * 60)
-    print("FINAL RESPONSE")
-    print("=" * 60)
-
-    print(final_state["final_response"])
+    print(
+        "This module requires an authenticated "
+        "Supabase user. "
+        "Run it through the FastAPI application."
+    )

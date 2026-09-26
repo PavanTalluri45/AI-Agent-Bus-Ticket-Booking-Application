@@ -1,10 +1,13 @@
 import os
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import HTTPException, status
 
 from .models import AuthenticatedUser
 
+
+load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY")
@@ -50,7 +53,16 @@ async def authenticate_supabase_token(
             detail="Authentication service unavailable.",
         ) from error
 
+    # TEMPORARY DEBUGGING
+    # This lets us see why Supabase rejected the token.
     if response.status_code != 200:
+        print("=" * 60)
+        print("SUPABASE AUTHENTICATION FAILED")
+        print("=" * 60)
+        print(f"Status code: {response.status_code}")
+        print(f"Response: {response.text}")
+        print("=" * 60)
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication failed.",
