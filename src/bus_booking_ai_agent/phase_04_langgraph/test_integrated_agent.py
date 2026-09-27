@@ -1,29 +1,46 @@
 import asyncio
 import json
 import sys
+from datetime import date
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
+from uuid import UUID
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from bus_booking_ai_agent.auth.models import AuthenticatedUser
-from bus_booking_ai_agent.config.gemini import client, MODEL
+from bus_booking_ai_agent.config.gemini import MODEL, client
 from bus_booking_ai_agent.phase_05_memory.memory_context import (
     get_relevant_memories,
 )
 
 
+# ============================================================================
+# Configuration
+# ============================================================================
+
 MAX_ITERATIONS = 5
 
 
+# ============================================================================
+# Agent State
+# ============================================================================
+
+
 class AgentState(TypedDict):
+    """
+    State carried through the LangGraph agent workflow.
+    """
+
     user_id: str
     user_message: str
     memories: list[dict]
+
     interaction_id: str
 
     tool_name: str
@@ -37,6 +54,11 @@ class AgentState(TypedDict):
     error: str
 
 
+# ============================================================================
+# MCP Server Configuration
+# ============================================================================
+
+
 PROJECT_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 SERVER_PATH = (
@@ -45,6 +67,29 @@ SERVER_PATH = (
     / "server"
     / "mcp_server.py"
 )
+
+
+# ============================================================================
+# Gemini Tool Definitions
+# ============================================================================
+#
+# These definitions tell Gemini which tools exist and what arguments
+# the model should generate.
+#
+# IMPORTANT:
+# Gemini's tool schema is NOT a security boundary.
+#
+# The application independently validates:
+#
+# Gemini
+#   ↓
+# Application guardrails
+#   ↓
+# MCP
+#   ↓
+# PostgreSQL
+#
+# ============================================================================
 
 
 TOOLS = [
@@ -92,7 +137,9 @@ TOOLS = [
                     "description": "Schedule UUID.",
                 },
             },
-            "required": ["schedule_id"],
+            "required": [
+                "schedule_id",
+            ],
         },
     },
     {
@@ -128,86 +175,418 @@ TOOLS = [
 ]
 
 
+# ============================================================================
+# Agent-Side Tool Input Guardrails
+# ============================================================================
+#
+# Gemini-generated arguments are untrusted input.
+#
+# We therefore validate them with Pydantic before they reach MCP.
+#
+# extra="forbid" is intentional.
+#
+# Without it:
+#
+# {
+#     "origin": "Hyderabad",
+#     "destination": "Bangalore",
+#     "travel_date": "2026-09-25",
+#     "malicious_field": "something"
+# }
+#
+# could have the unexpected field silently ignored.
+#
+# With extra="forbid", the complete argument object must match
+# the application's expected schema.
+# ============================================================================
+
+
+class SearchBusesArguments(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    origin: str = Field(
+        min_length=1,
+    )
+
+    destination: str = Field(
+        min_length=1,
+    )
+
+    travel_date: date
+
+
+class GetBusDetailsArguments(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+
+    schedule_id: UUID
+
+
+class CheckSeatAvailabilityArguments(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+
+    schedule_id: UUID
+    boarding_stop_id: UUID
+    dropping_stop_id: UUID
+
+
+# ============================================================================
+# Tool Guardrail Error
+# ============================================================================
+
+
+class ToolGuardrailError(ValueError):
+    """
+    Raised when a tool call violates an application-level guardrail.
+    """
+
+
+# ============================================================================
+# Authoritative Tool Allowlist
+# ============================================================================
+#
+# This is the application's source of truth for which Gemini tools
+# are actually allowed to execute.
+#
+# The model cannot introduce a new executable tool merely by returning
+# another function name.
+# ============================================================================
+
+
+TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
+    "search_buses": SearchBusesArguments,
+    "get_bus_details": GetBusDetailsArguments,
+    "check_seat_availability": CheckSeatAvailabilityArguments,
+}
+
+
+# ============================================================================
+# Gemini Tool → MCP Tool Mapping
+# ============================================================================
+#
+# Gemini-facing names are intentionally different from the MCP server
+# function names.
+#
+# Gemini:
+#     search_buses
+#
+# MCP:
+#     search_buses_tool
+#
+# The mapping is explicit and fixed.
+# ============================================================================
+
+
+MCP_TOOL_NAMES: dict[str, str] = {
+    "search_buses": "search_buses_tool",
+    "get_bus_details": "get_bus_details_tool",
+    "check_seat_availability": "check_seat_availability_tool",
+}
+
+
+# ============================================================================
+# Tool Name Validation
+# ============================================================================
+
+
+def validate_tool_name(tool_name: str) -> None:
+    """
+    Ensure that only explicitly registered tools can execute.
+    """
+
+    if tool_name not in TOOL_INPUT_MODELS:
+        raise ToolGuardrailError(
+            f"Tool '{tool_name}' is not allowed."
+        )
+
+    if tool_name not in MCP_TOOL_NAMES:
+        raise ToolGuardrailError(
+            f"Tool '{tool_name}' has no MCP mapping."
+        )
+
+
+# ============================================================================
+# Tool Argument Validation
+# ============================================================================
+
+
+def validate_tool_arguments(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Validate and normalize tool arguments.
+
+    This function is intentionally called before MCP execution.
+
+    Gemini output is treated as untrusted input even though the
+    request came from our own model.
+    """
+
+    validate_tool_name(tool_name)
+
+    if not isinstance(arguments, dict):
+        raise ToolGuardrailError(
+            f"Arguments for '{tool_name}' must be an object."
+        )
+
+    model = TOOL_INPUT_MODELS[tool_name]
+
+    try:
+        validated = model.model_validate(arguments)
+
+    except ValidationError as error:
+        raise ToolGuardrailError(
+            f"Invalid arguments for tool '{tool_name}': {error}"
+        ) from error
+
+    return validated.model_dump(
+        mode="json",
+    )
+
+
+# ============================================================================
+# Tool Result Guardrails
+# ============================================================================
+#
+# Tool results are also treated as untrusted data.
+#
+# The database/MCP layer remains responsible for business correctness.
+# This layer checks that the result has the expected broad structure
+# before the result becomes Gemini context.
+# ============================================================================
+
+
+def validate_tool_result(
+    tool_name: str,
+    result: Any,
+) -> str:
+    """
+    Validate the broad structure of an MCP tool result.
+
+    Returns:
+        JSON string safe to pass back into Gemini.
+    """
+
+    validate_tool_name(tool_name)
+
+    if not isinstance(result, dict):
+        raise ToolGuardrailError(
+            f"Tool '{tool_name}' must return structured content."
+        )
+
+    # ------------------------------------------------------------------------
+    # search_buses
+    # ------------------------------------------------------------------------
+
+    if tool_name == "search_buses":
+        content = result.get("result")
+
+        if content is None:
+            raise ToolGuardrailError(
+                "search_buses result is missing 'result'."
+            )
+
+        if not isinstance(content, list):
+            raise ToolGuardrailError(
+                "search_buses result must contain a list."
+            )
+
+    # ------------------------------------------------------------------------
+    # get_bus_details
+    # ------------------------------------------------------------------------
+
+    elif tool_name == "get_bus_details":
+        #
+        # The current MCP implementation returns structured content for
+        # this tool. The exact business object is owned by the database
+        # layer, so this first guardrail only verifies that structured
+        # content exists.
+        #
+        # We intentionally do not invent a second business schema here.
+        #
+        pass
+
+    # ------------------------------------------------------------------------
+    # check_seat_availability
+    # ------------------------------------------------------------------------
+
+    elif tool_name == "check_seat_availability":
+        content = result.get("result")
+
+        if content is None:
+            raise ToolGuardrailError(
+                "check_seat_availability result is missing 'result'."
+            )
+
+        if not isinstance(content, list):
+            raise ToolGuardrailError(
+                "check_seat_availability result must contain a list."
+            )
+
+    return json.dumps(
+        result,
+        default=str,
+    )
+
+
+# ============================================================================
+# MCP Client
+# ============================================================================
+
+
 async def call_mcp_tool(
     tool_name: str,
-    arguments: dict,
+    arguments: dict[str, Any],
 ) -> str:
+    """
+    Validate and execute an MCP tool.
+
+    The sequence is:
+
+        Gemini tool call
+            ↓
+        validate tool name
+            ↓
+        validate arguments
+            ↓
+        MCP
+            ↓
+        validate result
+            ↓
+        Gemini context
+    """
+
+    # ------------------------------------------------------------------------
+    # First validation boundary
+    # ------------------------------------------------------------------------
+
+    validated_arguments = validate_tool_arguments(
+        tool_name=tool_name,
+        arguments=arguments,
+    )
+
+    mcp_tool_name = MCP_TOOL_NAMES[tool_name]
 
     print("\n--- MCP CLIENT ---")
-    print(f"Tool: {tool_name}")
-    print(f"Arguments: {arguments}")
+    print(f"Gemini tool: {tool_name}")
+    print(f"MCP tool: {mcp_tool_name}")
+    print(
+        f"Validated arguments: {validated_arguments}"
+    )
+
+    # ------------------------------------------------------------------------
+    # Start MCP server
+    # ------------------------------------------------------------------------
 
     server_params = StdioServerParameters(
         command=sys.executable,
-        args=[str(SERVER_PATH)],
-        cwd=str(PROJECT_PACKAGE_ROOT.parent.parent),
+        args=[
+            str(SERVER_PATH),
+        ],
+        cwd=str(
+            PROJECT_PACKAGE_ROOT.parent.parent
+        ),
     )
 
-    async with stdio_client(server_params) as (read, write):
+    async with stdio_client(
+        server_params
+    ) as (read, write):
 
-        async with ClientSession(read, write) as session:
+        async with ClientSession(
+            read,
+            write,
+        ) as session:
 
             await session.initialize()
 
-            if tool_name == "search_buses":
+            # ---------------------------------------------------------------
+            # MCP execution
+            # ---------------------------------------------------------------
 
-                result = await session.call_tool(
-                    "search_buses_tool",
-                    arguments=arguments,
-                )
-
-            elif tool_name == "get_bus_details":
-
-                result = await session.call_tool(
-                    "get_bus_details_tool",
-                    arguments=arguments,
-                )
-
-            elif tool_name == "check_seat_availability":
-
-                result = await session.call_tool(
-                    "check_seat_availability_tool",
-                    arguments=arguments,
-                )
-
-            else:
-                raise ValueError(
-                    f"Unsupported tool: {tool_name}"
-                )
-
-            structured_content = getattr(
-                result,
-                "structured_content",
-                None,
+            result = await session.call_tool(
+                mcp_tool_name,
+                arguments=validated_arguments,
             )
 
-            if structured_content is not None:
-                return json.dumps(
-                    structured_content,
-                    default=str,
-                )
+    # ------------------------------------------------------------------------
+    # Extract structured MCP result
+    # ------------------------------------------------------------------------
 
-            return json.dumps([], default=str)
+    structured_content = getattr(
+        result,
+        "structured_content",
+        None,
+    )
+
+    if structured_content is None:
+        raise ToolGuardrailError(
+            f"Tool '{tool_name}' returned no structured content."
+        )
+
+    # ------------------------------------------------------------------------
+    # Result guardrail
+    # ------------------------------------------------------------------------
+
+    return validate_tool_result(
+        tool_name=tool_name,
+        result=structured_content,
+    )
 
 
-def build_memory_context(memories: list[dict]) -> str:
-    """Build advisory context from the authenticated user's memories."""
+# ============================================================================
+# Memory Context
+# ============================================================================
+
+
+def build_memory_context(
+    memories: list[dict],
+) -> str:
+    """
+    Convert retrieved user memories into advisory context.
+
+    Memory is NOT authoritative application state.
+    """
 
     if not memories:
         return ""
 
-    lines = ["Relevant user preferences:"]
+    lines = [
+        "Relevant user preferences:",
+    ]
 
     for memory in memories:
+        memory_key = memory.get("key")
+        memory_value = memory.get("value")
+
+        if not memory_key or not memory_value:
+            continue
+
         lines.append(
-            f"- {memory['key']}: {memory['value']}"
+            f"- {memory_key}: {memory_value}"
         )
+
+    if len(lines) == 1:
+        return ""
 
     return "\n".join(lines)
 
 
-def build_llm_input(state: AgentState) -> str:
-    """Build the first Gemini input with optional memory context."""
+def build_llm_input(
+    state: AgentState,
+) -> str:
+    """
+    Build the initial Gemini input.
+
+    Memory is explicitly marked as advisory so it cannot be confused
+    with real booking, pricing, availability, or schedule data.
+    """
 
     memory_context = build_memory_context(
         state["memories"]
@@ -219,13 +598,23 @@ def build_llm_input(state: AgentState) -> str:
     return (
         f"{memory_context}\n\n"
         "Use these preferences only as advisory context. "
-        "Never treat them as authoritative booking or availability data.\n\n"
+        "Never treat them as authoritative booking, schedule, "
+        "pricing, or availability data.\n\n"
         f"User request: {state['user_message']}"
     )
 
 
-def memory_node(state: AgentState) -> AgentState:
-    """Load memories belonging to the authenticated user."""
+# ============================================================================
+# Memory Node
+# ============================================================================
+
+
+def memory_node(
+    state: AgentState,
+) -> AgentState:
+    """
+    Load memories belonging only to the authenticated user.
+    """
 
     memories = get_relevant_memories(
         state["user_id"]
@@ -234,8 +623,14 @@ def memory_node(state: AgentState) -> AgentState:
     print("\n" + "=" * 60)
     print("--- MEMORY NODE ---")
     print("=" * 60)
-    print(f"User ID: {state['user_id']}")
-    print(f"Memories retrieved: {len(memories)}")
+
+    print(
+        f"User ID: {state['user_id']}"
+    )
+
+    print(
+        f"Memories retrieved: {len(memories)}"
+    )
 
     return {
         **state,
@@ -244,12 +639,20 @@ def memory_node(state: AgentState) -> AgentState:
     }
 
 
-def extract_final_text(response) -> str:
+# ============================================================================
+# Gemini Response Helpers
+# ============================================================================
+
+
+def extract_final_text(
+    response: Any,
+) -> str:
     """
     Extract final text from a Gemini interaction.
 
-    Prefer output_text. If it is unavailable, inspect the
-    returned interaction steps for a text/message step.
+    Prefer output_text.
+
+    If output_text is unavailable, inspect returned steps.
     """
 
     output_text = getattr(
@@ -258,7 +661,10 @@ def extract_final_text(response) -> str:
         None,
     )
 
-    if isinstance(output_text, str) and output_text.strip():
+    if (
+        isinstance(output_text, str)
+        and output_text.strip()
+    ):
         return output_text.strip()
 
     steps = getattr(
@@ -270,7 +676,6 @@ def extract_final_text(response) -> str:
     text_parts: list[str] = []
 
     for step in steps:
-
         step_type = getattr(
             step,
             "type",
@@ -290,7 +695,10 @@ def extract_final_text(response) -> str:
             None,
         )
 
-        if isinstance(text_value, str) and text_value.strip():
+        if (
+            isinstance(text_value, str)
+            and text_value.strip()
+        ):
             text_parts.append(
                 text_value.strip()
             )
@@ -302,36 +710,69 @@ def extract_final_text(response) -> str:
             None,
         )
 
-        if isinstance(content, str) and content.strip():
+        if (
+            isinstance(content, str)
+            and content.strip()
+        ):
             text_parts.append(
                 content.strip()
             )
 
     if text_parts:
-        return "\n".join(text_parts)
+        return "\n".join(
+            text_parts
+        )
 
     return ""
 
 
-def llm_node(state: AgentState) -> AgentState:
+# ============================================================================
+# LLM Node
+# ============================================================================
+
+
+def llm_node(
+    state: AgentState,
+) -> AgentState:
+    """
+    Ask Gemini to either:
+
+    1. Select an allowed tool, or
+    2. Produce the final response.
+
+    Tool arguments are validated immediately after Gemini generates them.
+    """
 
     print("\n" + "=" * 60)
     print("--- LLM NODE ---")
     print("=" * 60)
 
-    iteration = state["iteration"] + 1
+    iteration = (
+        state["iteration"] + 1
+    )
 
-    print(f"Iteration: {iteration}")
+    print(
+        f"Iteration: {iteration}"
+    )
 
     try:
+        # ====================================================================
+        # First Gemini interaction
+        # ====================================================================
 
         if not state["interaction_id"]:
 
             response = client.interactions.create(
                 model=MODEL,
-                input=build_llm_input(state),
+                input=build_llm_input(
+                    state
+                ),
                 tools=TOOLS,
             )
+
+        # ====================================================================
+        # Continue previous Gemini interaction with MCP result
+        # ====================================================================
 
         else:
 
@@ -349,12 +790,18 @@ def llm_node(state: AgentState) -> AgentState:
 
             response = client.interactions.create(
                 model=MODEL,
-                previous_interaction_id=state[
-                    "interaction_id"
+                previous_interaction_id=(
+                    state["interaction_id"]
+                ),
+                input=[
+                    function_result
                 ],
-                input=[function_result],
                 tools=TOOLS,
             )
+
+        # ====================================================================
+        # Inspect Gemini response
+        # ====================================================================
 
         steps = getattr(
             response,
@@ -365,43 +812,107 @@ def llm_node(state: AgentState) -> AgentState:
         tool_calls = [
             step
             for step in steps
-            if getattr(step, "type", None)
-            == "function_call"
+            if getattr(
+                step,
+                "type",
+                None,
+            ) == "function_call"
         ]
+
+        # ====================================================================
+        # Gemini requested a tool
+        # ====================================================================
 
         if tool_calls:
 
+            # Current architecture executes one tool call at a time.
             tool_call = tool_calls[0]
 
-            print(
-                f"Gemini selected tool: "
-                f"{tool_call.name}"
+            tool_name = str(
+                tool_call.name
+            )
+
+            raw_arguments = (
+                tool_call.arguments
+            )
+
+            # ---------------------------------------------------------------
+            # Validate tool arguments are an object
+            # ---------------------------------------------------------------
+
+            if not isinstance(
+                raw_arguments,
+                dict,
+            ):
+                raise ToolGuardrailError(
+                    "Gemini returned non-object tool arguments."
+                )
+
+            # ---------------------------------------------------------------
+            # Validate tool name + arguments
+            # ---------------------------------------------------------------
+
+            validated_arguments = (
+                validate_tool_arguments(
+                    tool_name=tool_name,
+                    arguments=raw_arguments,
+                )
             )
 
             print(
-                f"Tool arguments: "
-                f"{tool_call.arguments}"
+                "Gemini selected allowed tool: "
+                f"{tool_name}"
+            )
+
+            print(
+                "Validated tool arguments: "
+                f"{validated_arguments}"
             )
 
             return {
-                "user_id": state["user_id"],
-                "user_message": state["user_message"],
-                "memories": state["memories"],
+                "user_id": state[
+                    "user_id"
+                ],
+
+                "user_message": state[
+                    "user_message"
+                ],
+
+                "memories": state[
+                    "memories"
+                ],
+
                 "interaction_id": (
-                    getattr(response, "id", "")
+                    getattr(
+                        response,
+                        "id",
+                        "",
+                    )
                     or ""
                 ),
 
-                "tool_name": tool_call.name,
-                "tool_call_id": tool_call.id,
-                "tool_arguments": tool_call.arguments,
+                "tool_name": tool_name,
+
+                "tool_call_id": (
+                    tool_call.id
+                ),
+
+                "tool_arguments": (
+                    validated_arguments
+                ),
 
                 "tool_result": "",
+
                 "final_response": "",
 
                 "iteration": iteration,
+
                 "error": "",
             }
+
+        # ====================================================================
+        # Gemini produced final response
+        # ====================================================================
 
         output_text = extract_final_text(
             response
@@ -409,14 +920,17 @@ def llm_node(state: AgentState) -> AgentState:
 
         if not output_text:
 
-            print("\n--- GEMINI DEBUG ---")
             print(
-                "Gemini returned neither output_text "
-                "nor a readable text step."
+                "\n--- GEMINI DEBUG ---"
             )
 
             print(
-                f"Response ID: "
+                "Gemini returned neither "
+                "output_text nor a readable text step."
+            )
+
+            print(
+                "Response ID: "
                 f"{getattr(response, 'id', None)}"
             )
 
@@ -428,14 +942,29 @@ def llm_node(state: AgentState) -> AgentState:
                 "Gemini returned no final response."
             )
 
-        print("Gemini produced final response.")
+        print(
+            "Gemini produced final response."
+        )
 
         return {
-            "user_id": state["user_id"],
-            "user_message": state["user_message"],
-            "memories": state["memories"],
+            "user_id": state[
+                "user_id"
+            ],
+
+            "user_message": state[
+                "user_message"
+            ],
+
+            "memories": state[
+                "memories"
+            ],
+
             "interaction_id": (
-                getattr(response, "id", "")
+                getattr(
+                    response,
+                    "id",
+                    "",
+                )
                 or ""
             ),
 
@@ -443,104 +972,259 @@ def llm_node(state: AgentState) -> AgentState:
             "tool_call_id": "",
             "tool_arguments": {},
 
-            "tool_result": state["tool_result"],
+            "tool_result": state[
+                "tool_result"
+            ],
+
             "final_response": output_text,
 
             "iteration": iteration,
+
             "error": "",
         }
 
     except Exception as error:
 
-        print(f"LLM error: {error}")
+        print(
+            f"LLM error: {error}"
+        )
 
         return {
-            "user_id": state["user_id"],
-            "user_message": state["user_message"],
-            "memories": state["memories"],
-            "interaction_id": state["interaction_id"],
+            "user_id": state[
+                "user_id"
+            ],
+
+            "user_message": state[
+                "user_message"
+            ],
+
+            "memories": state[
+                "memories"
+            ],
+
+            "interaction_id": state[
+                "interaction_id"
+            ],
 
             "tool_name": "",
             "tool_call_id": "",
             "tool_arguments": {},
 
-            "tool_result": state["tool_result"],
+            "tool_result": state[
+                "tool_result"
+            ],
+
             "final_response": "",
 
             "iteration": iteration,
+
             "error": str(error),
         }
 
 
-def tool_node(state: AgentState) -> AgentState:
+# ============================================================================
+# Tool Node
+# ============================================================================
+
+
+def tool_node(
+    state: AgentState,
+) -> AgentState:
+    """
+    Execute the validated tool through MCP.
+
+    The tool arguments are intentionally validated a second time here.
+
+    This creates two application-level validation boundaries:
+
+        LLM node
+            ↓
+        validation
+            ↓
+        state
+            ↓
+        Tool node
+            ↓
+        validation again
+            ↓
+        MCP
+    """
 
     print("\n" + "=" * 60)
     print("--- TOOL NODE ---")
     print("=" * 60)
 
-    print(f"Tool: {state['tool_name']}")
+    print(
+        f"Requested tool: {state['tool_name']}"
+    )
 
     try:
 
-        tool_result = asyncio.run(
-            call_mcp_tool(
-                tool_name=state["tool_name"],
-                arguments=state["tool_arguments"],
+        # ====================================================================
+        # Second validation boundary
+        # ====================================================================
+
+        validated_arguments = (
+            validate_tool_arguments(
+                tool_name=state[
+                    "tool_name"
+                ],
+                arguments=state[
+                    "tool_arguments"
+                ],
             )
         )
 
-        print("\nMCP tool execution completed.")
+        # ====================================================================
+        # Execute real MCP tool
+        # ====================================================================
+
+        tool_result = asyncio.run(
+            call_mcp_tool(
+                tool_name=state[
+                    "tool_name"
+                ],
+                arguments=validated_arguments,
+            )
+        )
+
+        print(
+            "\nMCP tool execution completed."
+        )
 
         return {
-            "user_id": state["user_id"],
-            "user_message": state["user_message"],
-            "memories": state["memories"],
-            "interaction_id": state["interaction_id"],
+            "user_id": state[
+                "user_id"
+            ],
 
-            "tool_name": state["tool_name"],
-            "tool_call_id": state["tool_call_id"],
-            "tool_arguments": state["tool_arguments"],
+            "user_message": state[
+                "user_message"
+            ],
+
+            "memories": state[
+                "memories"
+            ],
+
+            "interaction_id": state[
+                "interaction_id"
+            ],
+
+            "tool_name": state[
+                "tool_name"
+            ],
+
+            "tool_call_id": state[
+                "tool_call_id"
+            ],
+
+            "tool_arguments": (
+                validated_arguments
+            ),
 
             "tool_result": tool_result,
+
             "final_response": "",
 
-            "iteration": state["iteration"],
+            "iteration": state[
+                "iteration"
+            ],
+
             "error": "",
         }
 
     except Exception as error:
 
-        print(f"Tool error: {error}")
+        print(
+            f"Tool error: {error}"
+        )
 
         return {
-            "user_id": state["user_id"],
-            "user_message": state["user_message"],
-            "memories": state["memories"],
-            "interaction_id": state["interaction_id"],
+            "user_id": state[
+                "user_id"
+            ],
 
-            "tool_name": state["tool_name"],
-            "tool_call_id": state["tool_call_id"],
-            "tool_arguments": state["tool_arguments"],
+            "user_message": state[
+                "user_message"
+            ],
+
+            "memories": state[
+                "memories"
+            ],
+
+            "interaction_id": state[
+                "interaction_id"
+            ],
+
+            "tool_name": state[
+                "tool_name"
+            ],
+
+            "tool_call_id": state[
+                "tool_call_id"
+            ],
+
+            "tool_arguments": state[
+                "tool_arguments"
+            ],
 
             "tool_result": "",
+
             "final_response": "",
 
-            "iteration": state["iteration"],
+            "iteration": state[
+                "iteration"
+            ],
+
             "error": str(error),
         }
 
 
+# ============================================================================
+# LangGraph Routing
+# ============================================================================
+
+
 def route_after_llm(
     state: AgentState,
-) -> Literal["tool", "error", "end"]:
+) -> Literal[
+    "tool",
+    "error",
+    "end",
+]:
+    """
+    Decide whether the graph should:
+
+    - execute a tool,
+    - go to the error node,
+    - or finish.
+    """
+
+    # ------------------------------------------------------------------------
+    # Error
+    # ------------------------------------------------------------------------
 
     if state["error"]:
-        print("\nRouter decision: error")
+
+        print(
+            "\nRouter decision: error"
+        )
+
         return "error"
+
+    # ------------------------------------------------------------------------
+    # Tool requested
+    # ------------------------------------------------------------------------
 
     if state["tool_name"]:
 
-        if state["iteration"] >= MAX_ITERATIONS:
+        # ---------------------------------------------------------------
+        # Maximum iteration guardrail
+        # ---------------------------------------------------------------
+
+        if (
+            state["iteration"]
+            >= MAX_ITERATIONS
+        ):
 
             print(
                 "\nMaximum iteration limit reached."
@@ -554,14 +1238,26 @@ def route_after_llm(
 
         return "tool"
 
-    print("\nRouter decision: finish")
+    # ------------------------------------------------------------------------
+    # Final response
+    # ------------------------------------------------------------------------
+
+    print(
+        "\nRouter decision: finish"
+    )
 
     return "end"
 
 
 def route_after_tool(
     state: AgentState,
-) -> Literal["llm", "error"]:
+) -> Literal[
+    "llm",
+    "error",
+]:
+    """
+    Route tool execution either back to Gemini or to the error node.
+    """
 
     if state["error"]:
 
@@ -578,36 +1274,79 @@ def route_after_tool(
     return "llm"
 
 
-def error_node(state: AgentState) -> AgentState:
+# ============================================================================
+# Error Node
+# ============================================================================
+
+
+def error_node(
+    state: AgentState,
+) -> AgentState:
+    """
+    Convert an internal error into a controlled final agent state.
+    """
 
     print("\n" + "=" * 60)
     print("--- ERROR NODE ---")
     print("=" * 60)
 
-    print(f"Error: {state['error']}")
+    print(
+        f"Error: {state['error']}"
+    )
 
     return {
-        "user_id": state["user_id"],
-        "user_message": state["user_message"],
-        "memories": state["memories"],
-        "interaction_id": state["interaction_id"],
+        "user_id": state[
+            "user_id"
+        ],
+
+        "user_message": state[
+            "user_message"
+        ],
+
+        "memories": state[
+            "memories"
+        ],
+
+        "interaction_id": state[
+            "interaction_id"
+        ],
 
         "tool_name": "",
         "tool_call_id": "",
         "tool_arguments": {},
 
-        "tool_result": state["tool_result"],
+        "tool_result": state[
+            "tool_result"
+        ],
+
         "final_response": (
             "The agent encountered an error: "
             f"{state['error']}"
         ),
 
-        "iteration": state["iteration"],
-        "error": state["error"],
+        "iteration": state[
+            "iteration"
+        ],
+
+        "error": state[
+            "error"
+        ],
     }
 
 
-builder = StateGraph(AgentState)
+# ============================================================================
+# LangGraph Definition
+# ============================================================================
+
+
+builder = StateGraph(
+    AgentState
+)
+
+
+# ---------------------------------------------------------------------------
+# Nodes
+# ---------------------------------------------------------------------------
 
 builder.add_node(
     "memory",
@@ -629,15 +1368,30 @@ builder.add_node(
     error_node,
 )
 
+
+# ---------------------------------------------------------------------------
+# Entry
+# ---------------------------------------------------------------------------
+
 builder.add_edge(
     START,
     "memory",
 )
 
+
+# ---------------------------------------------------------------------------
+# Memory → LLM
+# ---------------------------------------------------------------------------
+
 builder.add_edge(
     "memory",
     "llm",
 )
+
+
+# ---------------------------------------------------------------------------
+# LLM routing
+# ---------------------------------------------------------------------------
 
 builder.add_conditional_edges(
     "llm",
@@ -649,6 +1403,11 @@ builder.add_conditional_edges(
     },
 )
 
+
+# ---------------------------------------------------------------------------
+# Tool routing
+# ---------------------------------------------------------------------------
+
 builder.add_conditional_edges(
     "tool",
     route_after_tool,
@@ -658,17 +1417,33 @@ builder.add_conditional_edges(
     },
 )
 
+
+# ---------------------------------------------------------------------------
+# Error → END
+# ---------------------------------------------------------------------------
+
 builder.add_edge(
     "error",
     END,
 )
 
 
+# ============================================================================
+# LangGraph Checkpointing
+# ============================================================================
+
+
 checkpointer = MemorySaver()
 
+
 graph = builder.compile(
-    checkpointer=checkpointer
+    checkpointer=checkpointer,
 )
+
+
+# ============================================================================
+# Public Agent Entry Point
+# ============================================================================
 
 
 def run_agent(
@@ -679,9 +1454,28 @@ def run_agent(
     """
     Run the integrated agent for an authenticated user.
 
-    The user ID comes from Supabase Auth and is never
-    accepted as arbitrary client input.
+    IMPORTANT SECURITY RULE:
+
+    The user ID comes from Supabase authentication.
+
+    It is never accepted as arbitrary client input.
+
+    Architecture:
+
+        Supabase Auth
+              ↓
+        AuthenticatedUser
+              ↓
+        run_agent()
+              ↓
+        AgentState.user_id
+              ↓
+        Memory / authorization context
     """
+
+    # ------------------------------------------------------------------------
+    # Validate application input
+    # ------------------------------------------------------------------------
 
     if not user_message.strip():
         raise ValueError(
@@ -693,22 +1487,39 @@ def run_agent(
             "thread_id must not be empty."
         )
 
+    # ------------------------------------------------------------------------
+    # Build initial state
+    # ------------------------------------------------------------------------
+
     initial_state: AgentState = {
-        "user_id": str(current_user.id),
+        "user_id": str(
+            current_user.id
+        ),
+
         "user_message": user_message,
+
         "memories": [],
+
         "interaction_id": "",
 
         "tool_name": "",
+
         "tool_call_id": "",
+
         "tool_arguments": {},
 
         "tool_result": "",
+
         "final_response": "",
 
         "iteration": 0,
+
         "error": "",
     }
+
+    # ------------------------------------------------------------------------
+    # LangGraph thread configuration
+    # ------------------------------------------------------------------------
 
     config: RunnableConfig = {
         "configurable": {
@@ -716,16 +1527,25 @@ def run_agent(
         }
     }
 
+    # ------------------------------------------------------------------------
+    # Execute graph
+    # ------------------------------------------------------------------------
+
     return graph.invoke(
         initial_state,
         config=config,
     )
 
 
+# ============================================================================
+# Direct Execution Protection
+# ============================================================================
+
+
 if __name__ == "__main__":
 
     print(
         "This module requires an authenticated "
-        "Supabase user. "
-        "Run it through the FastAPI application."
+        "Supabase user. Run it through the "
+        "FastAPI application."
     )
