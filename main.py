@@ -6,6 +6,7 @@ from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
 )
 
 from bus_booking_ai_agent.phase_05_memory.memory_service import (
+    delete_memory,
     save_memory,
 )
 
@@ -373,6 +374,7 @@ async def verify_payment_endpoint(
             "error": str(error),
         }
 
+
 # ============================================================
 # Agent Chat
 # ============================================================
@@ -389,6 +391,11 @@ class UpdateMemoryRequest(BaseModel):
     memory_value: str = Field(min_length=1)
 
 
+class DeleteMemoryRequest(BaseModel):
+    memory_type: str = Field(min_length=1)
+    memory_key: str = Field(min_length=1)
+
+
 @app.post("/api/v1/chat")
 def chat_with_agent(
     request: AgentChatRequest,
@@ -401,6 +408,7 @@ def chat_with_agent(
     the authenticated user's UUID. The server namespaces the LangGraph
     thread with the authenticated Supabase user ID.
     """
+
     thread_id = f"{current_user.id}:{request.conversation_id}"
 
     result = run_agent(
@@ -414,6 +422,7 @@ def chat_with_agent(
         "conversation_id": request.conversation_id,
         "response": result["final_response"],
     }
+
 
 # ============================================================
 # Memory: Update User Memory
@@ -444,3 +453,31 @@ async def update_user_memory(
         "memory": memory,
     }
 
+
+# ============================================================
+# Memory: Delete User Memory
+# ============================================================
+
+
+@app.delete("/api/v1/memory")
+async def delete_user_memory(
+    request: DeleteMemoryRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Delete a memory belonging to the authenticated user.
+
+    The client never supplies the user ID.
+    The authenticated Supabase user ID determines ownership.
+    """
+
+    deleted = delete_memory(
+        user_id=str(current_user.id),
+        memory_type=request.memory_type,
+        memory_key=request.memory_key,
+    )
+
+    return {
+        "success": True,
+        "deleted": deleted,
+    }
