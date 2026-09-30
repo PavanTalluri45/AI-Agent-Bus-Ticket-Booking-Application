@@ -17,6 +17,7 @@ dependencies = [
     "python-dotenv>=1.2.3",
     "razorpay>=2.0.1",
     "sqlalchemy>=2.0.54",
+    "upstash-redis>=1.8.0",
 ]
 
 [project.scripts]
