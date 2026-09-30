@@ -1,6 +1,9 @@
 from sqlalchemy import text
 
 from bus_booking_ai_agent.config.database import engine
+from bus_booking_ai_agent.phase_05_memory.memory_safety import (
+    validate_memory_value,
+)
 
 
 CREATE_MEMORY_SQL = """
@@ -83,9 +86,15 @@ def save_memory(
     memory_key: str,
     memory_value: str,
 ) -> dict:
+    """
+    Create or update a user's memory.
+
+    Sensitive values are rejected before reaching PostgreSQL.
+    """
+
+    memory_value = validate_memory_value(memory_value)
 
     with engine.begin() as connection:
-
         result = connection.execute(
             text(CREATE_MEMORY_SQL),
             {
@@ -111,9 +120,11 @@ def get_memory(
     memory_type: str,
     memory_key: str,
 ) -> dict | None:
+    """
+    Get one memory belonging to the specified user.
+    """
 
     with engine.connect() as connection:
-
         result = connection.execute(
             text(GET_MEMORY_SQL),
             {
@@ -134,9 +145,11 @@ def get_memory(
 def get_user_memories(
     user_id: str,
 ) -> list[dict]:
+    """
+    Get all memories belonging to the specified user.
+    """
 
     with engine.connect() as connection:
-
         result = connection.execute(
             text(GET_USER_MEMORIES_SQL),
             {
@@ -155,9 +168,11 @@ def delete_memory(
     memory_type: str,
     memory_key: str,
 ) -> bool:
+    """
+    Delete one memory belonging to the specified user.
+    """
 
     with engine.begin() as connection:
-
         result = connection.execute(
             text(DELETE_MEMORY_SQL),
             {

@@ -1,5 +1,5 @@
 from fastapi import Depends, FastAPI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
     run_agent,
@@ -8,6 +8,10 @@ from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
 from bus_booking_ai_agent.phase_05_memory.memory_service import (
     delete_memory,
     save_memory,
+)
+
+from bus_booking_ai_agent.phase_05_memory.memory_safety import (
+    validate_memory_value,
 )
 
 from bus_booking_ai_agent.auth import (
@@ -389,6 +393,14 @@ class UpdateMemoryRequest(BaseModel):
     memory_type: str = Field(min_length=1)
     memory_key: str = Field(min_length=1)
     memory_value: str = Field(min_length=1)
+
+    @field_validator("memory_value")
+    @classmethod
+    def validate_memory_value_field(
+        cls,
+        value: str,
+    ) -> str:
+        return validate_memory_value(value)
 
 
 class DeleteMemoryRequest(BaseModel):
