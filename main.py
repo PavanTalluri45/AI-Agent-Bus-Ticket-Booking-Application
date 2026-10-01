@@ -1,4 +1,4 @@
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
@@ -12,6 +12,10 @@ from bus_booking_ai_agent.phase_05_memory.memory_service import (
 
 from bus_booking_ai_agent.phase_05_memory.memory_safety import (
     validate_memory_value,
+)
+
+from bus_booking_ai_agent.phase_06_security.rate_limiter import (
+    check_rate_limit,
 )
 
 from bus_booking_ai_agent.auth import (
@@ -420,6 +424,24 @@ def chat_with_agent(
     the authenticated user's UUID. The server namespaces the LangGraph
     thread with the authenticated Supabase user ID.
     """
+
+    rate_limit = check_rate_limit(
+        user_id=str(current_user.id),
+        action="agent_chat",
+        limit=10,
+        window_seconds=60,
+    )
+
+    if not rate_limit.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "Rate limit exceeded. Please wait before sending another request."
+            ),
+            headers={
+                "Retry-After": str(rate_limit.retry_after_seconds),
+            },
+        )
 
     thread_id = f"{current_user.id}:{request.conversation_id}"
 

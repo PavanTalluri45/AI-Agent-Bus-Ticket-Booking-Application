@@ -3,7 +3,7 @@ import json
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 from uuid import UUID
 
 from langchain_core.runnables import RunnableConfig
@@ -59,6 +59,29 @@ Follow these rules at all times:
 
 
 # ============================================================================
+# HITL State Types
+# ============================================================================
+
+
+ApprovalStatus = Literal[
+    "none",
+    "pending",
+    "approved",
+    "rejected",
+    "expired",
+    "cancelled",
+    "executed",
+]
+
+
+class PendingAction(TypedDict):
+    """Structured description of a consequential action awaiting approval."""
+
+    action: str
+    arguments: dict[str, Any]
+
+
+# ============================================================================
 # Agent State
 # ============================================================================
 
@@ -83,6 +106,10 @@ class AgentState(TypedDict):
 
     iteration: int
     error: str
+
+    # HITL fields are optional until an action actually requires approval.
+    pending_action: NotRequired[PendingAction | None]
+    approval_status: NotRequired[ApprovalStatus]
 
 
 # ============================================================================
@@ -1567,6 +1594,10 @@ def run_agent(
         "iteration": 0,
 
         "error": "",
+
+        # No human approval is required when the workflow starts.
+        "pending_action": None,
+        "approval_status": "none",
     }
 
     # ------------------------------------------------------------------------
