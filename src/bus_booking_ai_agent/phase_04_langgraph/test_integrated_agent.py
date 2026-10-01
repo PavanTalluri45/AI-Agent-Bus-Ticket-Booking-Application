@@ -9,6 +9,7 @@ from uuid import UUID
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -111,6 +112,34 @@ class AgentState(TypedDict):
     pending_action: NotRequired[PendingAction | None]
     approval_status: NotRequired[ApprovalStatus]
 
+
+
+class AgentUpdate(TypedDict, total=False):
+    """
+    Partial state update returned by a LangGraph node.
+
+    LangGraph nodes return only the keys they change, and LangGraph merges
+    them into AgentState. Keep these keys in sync with AgentState.
+    """
+
+    user_id: str
+    user_message: str
+    memories: list[dict]
+
+    interaction_id: str
+
+    tool_name: str
+    tool_call_id: str
+    tool_arguments: dict
+
+    tool_result: str
+    final_response: str
+
+    iteration: int
+    error: str
+
+    pending_action: PendingAction | None
+    approval_status: ApprovalStatus
 
 # ============================================================================
 # MCP Server Configuration
@@ -682,35 +711,37 @@ def build_llm_input(
 
 
 # ============================================================================
+# Logging Helper
+# ============================================================================
+
+
+def print_node_banner(title: str) -> None:
+    """Print a consistent banner when a graph node starts."""
+
+    print("\n" + "=" * 60)
+    print(f"--- {title} ---")
+    print("=" * 60)
+
+
+# ============================================================================
 # Memory Node
 # ============================================================================
 
 
 def memory_node(
     state: AgentState,
-) -> AgentState:
+) -> AgentUpdate:
     """
     Load memories belonging only to the authenticated user.
     """
 
-    memories = get_relevant_memories(
-        state["user_id"]
-    )
+    memories = get_relevant_memories(state["user_id"])
 
-    print("\n" + "=" * 60)
-    print("--- MEMORY NODE ---")
-    print("=" * 60)
-
-    print(
-        f"User ID: {state['user_id']}"
-    )
-
-    print(
-        f"Memories retrieved: {len(memories)}"
-    )
+    print_node_banner("MEMORY NODE")
+    print(f"User ID: {state['user_id']}")
+    print(f"Memories retrieved: {len(memories)}")
 
     return {
-        **state,
         "memories": memories,
         "error": "",
     }
@@ -808,9 +839,46 @@ def extract_final_text(
 # ============================================================================
 
 
+def create_gemini_interaction(
+    state: AgentState,
+) -> Any:
+    """
+    Start a new Gemini interaction, or continue the previous one
+    by sending back the MCP tool result.
+    """
+
+    if not state["interaction_id"]:
+        return client.interactions.create(
+            model=MODEL,
+            system_instruction=AGENT_SYSTEM_INSTRUCTION,
+            input=build_llm_input(state),
+            tools=TOOLS,
+        )
+
+    function_result = {
+        "type": "function_result",
+        "name": state["tool_name"],
+        "call_id": state["tool_call_id"],
+        "result": [
+            {
+                "type": "text",
+                "text": state["tool_result"],
+            }
+        ],
+    }
+
+    return client.interactions.create(
+        model=MODEL,
+        system_instruction=AGENT_SYSTEM_INSTRUCTION,
+        previous_interaction_id=state["interaction_id"],
+        input=[function_result],
+        tools=TOOLS,
+    )
+
+
 def llm_node(
     state: AgentState,
-) -> AgentState:
+) -> AgentUpdate:
     """
     Ask Gemini to either:
 
@@ -820,283 +888,95 @@ def llm_node(
     Tool arguments are validated immediately after Gemini generates them.
     """
 
-    print("\n" + "=" * 60)
-    print("--- LLM NODE ---")
-    print("=" * 60)
+    print_node_banner("LLM NODE")
 
-    iteration = (
-        state["iteration"] + 1
-    )
-
-    print(
-        f"Iteration: {iteration}"
-    )
+    iteration = state["iteration"] + 1
+    print(f"Iteration: {iteration}")
 
     try:
-        # ====================================================================
-        # First Gemini interaction
-        # ====================================================================
+        response = create_gemini_interaction(state)
 
-        if not state["interaction_id"]:
-
-            response = client.interactions.create(
-                model=MODEL,
-                system_instruction=AGENT_SYSTEM_INSTRUCTION,
-                input=build_llm_input(
-                    state
-                ),
-                tools=TOOLS,
-            )
-
-        # ====================================================================
-        # Continue previous Gemini interaction with MCP result
-        # ====================================================================
-
-        else:
-
-            function_result = {
-                "type": "function_result",
-                "name": state["tool_name"],
-                "call_id": state["tool_call_id"],
-                "result": [
-                    {
-                        "type": "text",
-                        "text": state["tool_result"],
-                    }
-                ],
-            }
-
-            response = client.interactions.create(
-                model=MODEL,
-                system_instruction=AGENT_SYSTEM_INSTRUCTION,
-                previous_interaction_id=(
-                    state["interaction_id"]
-                ),
-                input=[
-                    function_result
-                ],
-                tools=TOOLS,
-            )
-
-        # ====================================================================
-        # Inspect Gemini response
-        # ====================================================================
-
-        steps = getattr(
-            response,
-            "steps",
-            None,
-        ) or []
+        interaction_id = getattr(response, "id", "") or ""
+        steps = getattr(response, "steps", None) or []
 
         tool_calls = [
             step
             for step in steps
-            if getattr(
-                step,
-                "type",
-                None,
-            ) == "function_call"
+            if getattr(step, "type", None) == "function_call"
         ]
 
-        # ====================================================================
+        # --------------------------------------------------------------------
         # Gemini requested a tool
-        # ====================================================================
+        # --------------------------------------------------------------------
 
         if tool_calls:
-
             # Current architecture executes one tool call at a time.
             tool_call = tool_calls[0]
+            tool_name = str(tool_call.name)
+            raw_arguments = tool_call.arguments
 
-            tool_name = str(
-                tool_call.name
-            )
-
-            raw_arguments = (
-                tool_call.arguments
-            )
-
-            # ---------------------------------------------------------------
-            # Validate tool arguments are an object
-            # ---------------------------------------------------------------
-
-            if not isinstance(
-                raw_arguments,
-                dict,
-            ):
+            if not isinstance(raw_arguments, dict):
                 raise ToolGuardrailError(
                     "Gemini returned non-object tool arguments."
                 )
 
-            # ---------------------------------------------------------------
-            # Validate tool name + arguments
-            # ---------------------------------------------------------------
-
-            validated_arguments = (
-                validate_tool_arguments(
-                    tool_name=tool_name,
-                    arguments=raw_arguments,
-                )
+            validated_arguments = validate_tool_arguments(
+                tool_name=tool_name,
+                arguments=raw_arguments,
             )
 
-            print(
-                "Gemini selected allowed tool: "
-                f"{tool_name}"
-            )
-
-            print(
-                "Validated tool arguments: "
-                f"{validated_arguments}"
-            )
+            print(f"Gemini selected allowed tool: {tool_name}")
+            print(f"Validated tool arguments: {validated_arguments}")
 
             return {
-                "user_id": state[
-                    "user_id"
-                ],
-
-                "user_message": state[
-                    "user_message"
-                ],
-
-                "memories": state[
-                    "memories"
-                ],
-
-                "interaction_id": (
-                    getattr(
-                        response,
-                        "id",
-                        "",
-                    )
-                    or ""
-                ),
-
+                "interaction_id": interaction_id,
                 "tool_name": tool_name,
-
-                "tool_call_id": (
-                    tool_call.id
-                ),
-
-                "tool_arguments": (
-                    validated_arguments
-                ),
-
+                "tool_call_id": tool_call.id,
+                "tool_arguments": validated_arguments,
                 "tool_result": "",
-
                 "final_response": "",
-
                 "iteration": iteration,
-
                 "error": "",
             }
 
-        # ====================================================================
-        # Gemini produced final response
-        # ====================================================================
+        # --------------------------------------------------------------------
+        # Gemini produced a final response
+        # --------------------------------------------------------------------
 
-        output_text = extract_final_text(
-            response
-        )
+        output_text = extract_final_text(response)
 
         if not output_text:
-
+            print("\n--- GEMINI DEBUG ---")
             print(
-                "\n--- GEMINI DEBUG ---"
+                "Gemini returned neither output_text "
+                "nor a readable text step."
             )
+            print(f"Response ID: {interaction_id}")
+            print(f"Response steps: {steps}")
 
-            print(
-                "Gemini returned neither "
-                "output_text nor a readable text step."
-            )
+            raise RuntimeError("Gemini returned no final response.")
 
-            print(
-                "Response ID: "
-                f"{getattr(response, 'id', None)}"
-            )
-
-            print(
-                f"Response steps: {steps}"
-            )
-
-            raise RuntimeError(
-                "Gemini returned no final response."
-            )
-
-        print(
-            "Gemini produced final response."
-        )
+        print("Gemini produced final response.")
 
         return {
-            "user_id": state[
-                "user_id"
-            ],
-
-            "user_message": state[
-                "user_message"
-            ],
-
-            "memories": state[
-                "memories"
-            ],
-
-            "interaction_id": (
-                getattr(
-                    response,
-                    "id",
-                    "",
-                )
-                or ""
-            ),
-
+            "interaction_id": interaction_id,
             "tool_name": "",
             "tool_call_id": "",
             "tool_arguments": {},
-
-            "tool_result": state[
-                "tool_result"
-            ],
-
             "final_response": output_text,
-
             "iteration": iteration,
-
             "error": "",
         }
 
     except Exception as error:
-
-        print(
-            f"LLM error: {error}"
-        )
+        print(f"LLM error: {error}")
 
         return {
-            "user_id": state[
-                "user_id"
-            ],
-
-            "user_message": state[
-                "user_message"
-            ],
-
-            "memories": state[
-                "memories"
-            ],
-
-            "interaction_id": state[
-                "interaction_id"
-            ],
-
             "tool_name": "",
             "tool_call_id": "",
             "tool_arguments": {},
-
-            "tool_result": state[
-                "tool_result"
-            ],
-
             "final_response": "",
-
             "iteration": iteration,
-
             "error": str(error),
         }
 
@@ -1108,7 +988,7 @@ def llm_node(
 
 def tool_node(
     state: AgentState,
-) -> AgentState:
+) -> AgentUpdate:
     """
     Execute the validated tool through MCP.
 
@@ -1129,131 +1009,39 @@ def tool_node(
         MCP
     """
 
-    print("\n" + "=" * 60)
-    print("--- TOOL NODE ---")
-    print("=" * 60)
-
-    print(
-        f"Requested tool: {state['tool_name']}"
-    )
+    print_node_banner("TOOL NODE")
+    print(f"Requested tool: {state['tool_name']}")
 
     try:
-
-        # ====================================================================
         # Second validation boundary
-        # ====================================================================
-
-        validated_arguments = (
-            validate_tool_arguments(
-                tool_name=state[
-                    "tool_name"
-                ],
-                arguments=state[
-                    "tool_arguments"
-                ],
-            )
+        validated_arguments = validate_tool_arguments(
+            tool_name=state["tool_name"],
+            arguments=state["tool_arguments"],
         )
 
-        # ====================================================================
         # Execute real MCP tool
-        # ====================================================================
-
         tool_result = asyncio.run(
             call_mcp_tool(
-                tool_name=state[
-                    "tool_name"
-                ],
+                tool_name=state["tool_name"],
                 arguments=validated_arguments,
             )
         )
 
-        print(
-            "\nMCP tool execution completed."
-        )
+        print("\nMCP tool execution completed.")
 
         return {
-            "user_id": state[
-                "user_id"
-            ],
-
-            "user_message": state[
-                "user_message"
-            ],
-
-            "memories": state[
-                "memories"
-            ],
-
-            "interaction_id": state[
-                "interaction_id"
-            ],
-
-            "tool_name": state[
-                "tool_name"
-            ],
-
-            "tool_call_id": state[
-                "tool_call_id"
-            ],
-
-            "tool_arguments": (
-                validated_arguments
-            ),
-
+            "tool_arguments": validated_arguments,
             "tool_result": tool_result,
-
             "final_response": "",
-
-            "iteration": state[
-                "iteration"
-            ],
-
             "error": "",
         }
 
     except Exception as error:
-
-        print(
-            f"Tool error: {error}"
-        )
+        print(f"Tool error: {error}")
 
         return {
-            "user_id": state[
-                "user_id"
-            ],
-
-            "user_message": state[
-                "user_message"
-            ],
-
-            "memories": state[
-                "memories"
-            ],
-
-            "interaction_id": state[
-                "interaction_id"
-            ],
-
-            "tool_name": state[
-                "tool_name"
-            ],
-
-            "tool_call_id": state[
-                "tool_call_id"
-            ],
-
-            "tool_arguments": state[
-                "tool_arguments"
-            ],
-
             "tool_result": "",
-
             "final_response": "",
-
-            "iteration": state[
-                "iteration"
-            ],
-
             "error": str(error),
         }
 
@@ -1267,15 +1055,20 @@ def route_after_llm(
     state: AgentState,
 ) -> Literal[
     "tool",
+    "approval",
     "error",
     "end",
 ]:
     """
     Decide whether the graph should:
 
-    - execute a tool,
     - go to the error node,
+    - pause for human approval,
+    - execute a tool,
     - or finish.
+
+    Every string returned here must also be a key in the mapping passed
+    to add_conditional_edges() for the "llm" node.
     """
 
     # ------------------------------------------------------------------------
@@ -1289,6 +1082,16 @@ def route_after_llm(
         )
 
         return "error"
+
+    # ------------------------------------------------------------------------
+    # Human approval required
+    # ------------------------------------------------------------------------
+
+    if state.get("pending_action") and state.get("approval_status") == "pending":
+
+        print("\nRouter decision: human approval required")
+
+        return "approval"
 
     # ------------------------------------------------------------------------
     # Tool requested
@@ -1354,62 +1157,84 @@ def route_after_tool(
 
 
 # ============================================================================
+# Human-in-the-Loop Approval Node
+# ============================================================================
+
+
+def approval_node(
+    state: AgentState,
+) -> AgentUpdate:
+    """
+    Pause the graph and request explicit human approval for a pending action.
+
+    The node does not execute the action. It only records the approval
+    decision so a later action node can perform the already-authorized work.
+    """
+
+    pending_action = state.get("pending_action")
+
+    if not pending_action:
+        return {
+            "approval_status": "none",
+            "error": "",
+        }
+
+    print_node_banner("HITL APPROVAL NODE")
+    print(f"Action awaiting approval: {pending_action['action']}")
+
+    decision = interrupt(
+        {
+            "type": "approval_request",
+            "action": pending_action["action"],
+            "arguments": pending_action["arguments"],
+            "message": (
+                "Human approval is required before this consequential "
+                "action can continue."
+            ),
+        }
+    )
+
+    if decision == "approve":
+        print("Human approval received: approve")
+        return {
+            "approval_status": "approved",
+            "error": "",
+        }
+
+    if decision == "reject":
+        print("Human approval received: reject")
+        return {
+            "approval_status": "rejected",
+            "error": "",
+        }
+
+    raise ValueError(
+        "Invalid HITL approval decision. Expected 'approve' or 'reject'."
+    )
+
+
+# ============================================================================
 # Error Node
 # ============================================================================
 
 
 def error_node(
     state: AgentState,
-) -> AgentState:
+) -> AgentUpdate:
     """
     Convert an internal error into a controlled final agent state.
     """
 
-    print("\n" + "=" * 60)
-    print("--- ERROR NODE ---")
-    print("=" * 60)
-
-    print(
-        f"Error: {state['error']}"
-    )
+    print_node_banner("ERROR NODE")
+    print(f"Error: {state['error']}")
 
     return {
-        "user_id": state[
-            "user_id"
-        ],
-
-        "user_message": state[
-            "user_message"
-        ],
-
-        "memories": state[
-            "memories"
-        ],
-
-        "interaction_id": state[
-            "interaction_id"
-        ],
-
         "tool_name": "",
         "tool_call_id": "",
         "tool_arguments": {},
-
-        "tool_result": state[
-            "tool_result"
-        ],
-
         "final_response": (
-            "The agent encountered an error: "
-            f"{state['error']}"
+            f"The agent encountered an error: {state['error']}"
         ),
-
-        "iteration": state[
-            "iteration"
-        ],
-
-        "error": state[
-            "error"
-        ],
     }
 
 
@@ -1440,6 +1265,11 @@ builder.add_node(
 builder.add_node(
     "tool",
     tool_node,
+)
+
+builder.add_node(
+    "approval",
+    approval_node,
 )
 
 builder.add_node(
@@ -1477,9 +1307,25 @@ builder.add_conditional_edges(
     route_after_llm,
     {
         "tool": "tool",
+        "approval": "approval",
         "error": "error",
         "end": END,
     },
+)
+
+
+# ---------------------------------------------------------------------------
+# Approval routing
+# ---------------------------------------------------------------------------
+#
+# HITL currently stops after recording the human decision. A real
+# consequential action executor will be connected here only after the
+# corresponding action tool exists. This prevents approval from accidentally
+# executing a non-existent or fake booking operation.
+
+builder.add_edge(
+    "approval",
+    END,
 )
 
 
@@ -1529,6 +1375,7 @@ def run_agent(
     current_user: AuthenticatedUser,
     user_message: str,
     thread_id: str,
+    approval_decision: Literal["approve", "reject"] | None = None,
 ) -> dict:
     """
     Run the integrated agent for an authenticated user.
@@ -1564,6 +1411,20 @@ def run_agent(
     if not thread_id.strip():
         raise ValueError(
             "thread_id must not be empty."
+        )
+
+    # ------------------------------------------------------------------------
+    # Resume an interrupted HITL workflow
+    # ------------------------------------------------------------------------
+
+    if approval_decision is not None:
+        return graph.invoke(
+            Command(resume=approval_decision),
+            config={
+                "configurable": {
+                    "thread_id": thread_id,
+                }
+            },
         )
 
     # ------------------------------------------------------------------------
