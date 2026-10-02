@@ -30,7 +30,53 @@ SELECT
     r.origin,
     r.destination,
     r.distance_km,
-    r.estimated_duration_minutes
+    r.estimated_duration_minutes,
+
+    COALESCE(
+        (
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'stop_id', rs.id,
+                    'stop_name', rs.stop_name,
+                    'sequence_number', rs.sequence_number,
+                    'arrival_time', ss.arrival_time,
+                    'departure_time', ss.departure_time,
+                    'is_boarding_allowed', ss.is_boarding_allowed,
+                    'is_dropping_allowed', ss.is_dropping_allowed
+                )
+                ORDER BY rs.sequence_number
+            )
+            FROM schedule_stops ss
+            JOIN route_stops rs
+                ON rs.id = ss.route_stop_id
+            WHERE ss.schedule_id = s.id
+              AND ss.is_boarding_allowed = TRUE
+        ),
+        '[]'::jsonb
+    ) AS boarding_stops,
+
+    COALESCE(
+        (
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'stop_id', rs.id,
+                    'stop_name', rs.stop_name,
+                    'sequence_number', rs.sequence_number,
+                    'arrival_time', ss.arrival_time,
+                    'departure_time', ss.departure_time,
+                    'is_boarding_allowed', ss.is_boarding_allowed,
+                    'is_dropping_allowed', ss.is_dropping_allowed
+                )
+                ORDER BY rs.sequence_number
+            )
+            FROM schedule_stops ss
+            JOIN route_stops rs
+                ON rs.id = ss.route_stop_id
+            WHERE ss.schedule_id = s.id
+              AND ss.is_dropping_allowed = TRUE
+        ),
+        '[]'::jsonb
+    ) AS dropping_stops
 
 FROM schedules s
 
