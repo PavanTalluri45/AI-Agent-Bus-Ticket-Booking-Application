@@ -1,4 +1,6 @@
-from fastapi import Depends, FastAPI, HTTPException
+from uuid import uuid4
+
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
 from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
@@ -390,7 +392,6 @@ async def verify_payment_endpoint(
 
 class AgentChatRequest(BaseModel):
     message: str = Field(min_length=1)
-    conversation_id: str = Field(min_length=1)
 
 
 class UpdateMemoryRequest(BaseModel):
@@ -414,15 +415,20 @@ class DeleteMemoryRequest(BaseModel):
 
 @app.post("/api/v1/chat")
 def chat_with_agent(
-    request: AgentChatRequest,
+    request: Request,
+    response: Response,
+    chat_request: AgentChatRequest,
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
     Run the bus-booking agent for the authenticated user.
 
-    The client supplies a conversation identifier, but never supplies
-    the authenticated user's UUID. The server namespaces the LangGraph
-    thread with the authenticated Supabase user ID.
+    The client sends only the user's message. The backend manages the
+    conversation identifier through an HttpOnly cookie so the user never
+    needs to enter or know the conversation ID.
+
+    The conversation identifier is scoped into the LangGraph thread with
+    the authenticated Supabase user ID.
     """
 
     rate_limit = check_rate_limit(
@@ -443,19 +449,34 @@ def chat_with_agent(
             },
         )
 
-    thread_id = f"{current_user.id}:{request.conversation_id}"
+    conversation_id = request.cookies.get("bus_booking_conversation_id")
+
+    if not conversation_id:
+        conversation_id = str(uuid4())
+
+        response.set_cookie(
+            key="bus_booking_conversation_id",
+            value=conversation_id,
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            max_age=60 * 60 * 24 * 30,
+        )
+
+    thread_id = f"{current_user.id}:{conversation_id}"
 
     result = run_agent(
         current_user=current_user,
-        user_message=request.message,
+        user_message=chat_request.message,
         thread_id=thread_id,
     )
 
     return {
         "success": True,
-        "conversation_id": request.conversation_id,
+        "conversation_id": conversation_id,
         "response": result["final_response"],
     }
+
 
 
 # ============================================================

@@ -1,18 +1,27 @@
 import asyncio
+import atexit
 import json
+import os
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Any, Literal, NotRequired, TypedDict, cast
+from typing import Any, Literal, NotRequired, TypedDict
+from urllib.parse import quote_plus
 from uuid import UUID
 
 from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
+from psycopg import Connection
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool
 from langgraph.types import Command, interrupt
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+load_dotenv()
 
 from bus_booking_ai_agent.auth.models import AuthenticatedUser
 from bus_booking_ai_agent.config.gemini import MODEL, client
@@ -563,14 +572,12 @@ def validate_arguments_against_booking_context(
 def validate_tool_result(
     tool_name: str,
     result: Any,
-) -> str:
-    """
-    Validate the broad structure of an MCP tool result.
+) -> dict[str, Any]:
+    """Validate and return the structured MCP result.
 
-    Returns:
-        JSON string safe to pass back into Gemini.
+    Application state must receive structured data directly. LLM-facing
+    formatting is handled separately by ``serialize_tool_result_for_llm``.
     """
-
     validate_tool_name(tool_name)
 
     if not isinstance(result, dict):
@@ -578,60 +585,40 @@ def validate_tool_result(
             f"Tool '{tool_name}' must return structured content."
         )
 
-    # ------------------------------------------------------------------------
-    # search_buses
-    # ------------------------------------------------------------------------
+    content = result.get("result")
 
     if tool_name == "search_buses":
-        content = result.get("result")
-
         if content is None:
-            raise ToolGuardrailError(
-                "search_buses result is missing 'result'."
-            )
-
+            raise ToolGuardrailError("search_buses result is missing 'result'.")
         if not isinstance(content, list):
-            raise ToolGuardrailError(
-                "search_buses result must contain a list."
-            )
-
-    # ------------------------------------------------------------------------
-    # get_bus_details
-    # ------------------------------------------------------------------------
+            raise ToolGuardrailError("search_buses result must contain a list.")
 
     elif tool_name == "get_bus_details":
-        #
-        # The current MCP implementation returns structured content for
-        # this tool. The exact business object is owned by the database
-        # layer, so this first guardrail only verifies that structured
-        # content exists.
-        #
-        # We intentionally do not invent a second business schema here.
-        #
-        pass
-
-    # ------------------------------------------------------------------------
-    # check_seat_availability
-    # ------------------------------------------------------------------------
+        if content is not None and not isinstance(content, dict):
+            raise ToolGuardrailError(
+                "get_bus_details result must contain an object or null."
+            )
 
     elif tool_name == "check_seat_availability":
-        content = result.get("result")
-
         if content is None:
             raise ToolGuardrailError(
                 "check_seat_availability result is missing 'result'."
             )
-
         if not isinstance(content, list):
             raise ToolGuardrailError(
                 "check_seat_availability result must contain a list."
             )
 
-    serialized_result = json.dumps(
-        result,
-        default=str,
-    )
+    return result
 
+
+def serialize_tool_result_for_llm(result: dict[str, Any]) -> str:
+    """Create the security-wrapped representation sent to Gemini.
+
+    This representation is for LLM context only and is never parsed back
+    into application state.
+    """
+    serialized_result = json.dumps(result, default=str)
     return (
         "<untrusted_tool_result>\n"
         "The following data came from an application tool/database. "
@@ -650,95 +637,38 @@ def validate_tool_result(
 async def call_mcp_tool(
     tool_name: str,
     arguments: dict[str, Any],
-) -> str:
-    """
-    Validate and execute an MCP tool.
-
-    The sequence is:
-
-        Gemini tool call
-            ↓
-        validate tool name
-            ↓
-        validate arguments
-            ↓
-        MCP
-            ↓
-        validate result
-            ↓
-        Gemini context
-    """
-
-    # ------------------------------------------------------------------------
-    # First validation boundary
-    # ------------------------------------------------------------------------
-
+) -> dict[str, Any]:
+    """Validate, execute, and return the structured MCP result."""
     validated_arguments = validate_tool_arguments(
         tool_name=tool_name,
         arguments=arguments,
     )
-
     mcp_tool_name = MCP_TOOL_NAMES[tool_name]
 
     print("\n--- MCP CLIENT ---")
     print(f"Gemini tool: {tool_name}")
     print(f"MCP tool: {mcp_tool_name}")
-    print(
-        f"Validated arguments: {validated_arguments}"
-    )
-
-    # ------------------------------------------------------------------------
-    # Start MCP server
-    # ------------------------------------------------------------------------
+    print(f"Validated arguments: {validated_arguments}")
 
     server_params = StdioServerParameters(
         command=sys.executable,
-        args=[
-            str(SERVER_PATH),
-        ],
-        cwd=str(
-            PROJECT_PACKAGE_ROOT.parent.parent
-        ),
+        args=[str(SERVER_PATH)],
+        cwd=str(PROJECT_PACKAGE_ROOT.parent.parent),
     )
 
-    async with stdio_client(
-        server_params
-    ) as (read, write):
-
-        async with ClientSession(
-            read,
-            write,
-        ) as session:
-
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
             await session.initialize()
-
-            # ---------------------------------------------------------------
-            # MCP execution
-            # ---------------------------------------------------------------
-
             result = await session.call_tool(
                 mcp_tool_name,
                 arguments=validated_arguments,
             )
 
-    # ------------------------------------------------------------------------
-    # Extract structured MCP result
-    # ------------------------------------------------------------------------
-
-    structured_content = getattr(
-        result,
-        "structured_content",
-        None,
-    )
-
+    structured_content = getattr(result, "structured_content", None)
     if structured_content is None:
         raise ToolGuardrailError(
             f"Tool '{tool_name}' returned no structured content."
         )
-
-    # ------------------------------------------------------------------------
-    # Result guardrail
-    # ------------------------------------------------------------------------
 
     return validate_tool_result(
         tool_name=tool_name,
@@ -1157,52 +1087,23 @@ def llm_node(
 # ============================================================================
 
 
-def _parse_tool_result_payload(tool_result: str) -> Any:
-    """Extract the JSON payload from the untrusted tool-result wrapper."""
-
-    prefix = "<untrusted_tool_result>\n"
-    suffix = "\n</untrusted_tool_result>"
-
-    if not tool_result.startswith(prefix) or not tool_result.endswith(suffix):
-        return None
-
-    payload_text = tool_result[len(prefix):-len(suffix)]
-
-    try:
-        return json.loads(payload_text)
-    except json.JSONDecodeError:
-        return None
-
-
 def update_booking_context_from_tool_result(
     context: BookingContext,
     tool_name: str,
-    tool_result: str,
+    tool_result: dict[str, Any],
 ) -> BookingContext:
-    """Persist only authoritative identifiers/data returned by MCP."""
-
-    updated = cast(BookingContext, dict(context))
-    payload = _parse_tool_result_payload(tool_result)
-
-    if not isinstance(payload, dict):
-        return updated
-
-    content = payload.get("result")
+    """Persist authoritative application data from a structured MCP result."""
+    updated: BookingContext = dict(context)
+    content = tool_result.get("result")
 
     if tool_name == "search_buses" and isinstance(content, list):
-        # Keep search candidates available for application-side reasoning.
         updated["available_schedules"] = content
         return updated
 
     if tool_name == "get_bus_details" and isinstance(content, dict):
         for key in (
-            "schedule_id",
-            "bus_number",
-            "operator_name",
-            "bus_type",
-            "travel_date",
-            "origin",
-            "destination",
+            "schedule_id", "bus_number", "operator_name", "bus_type",
+            "travel_date", "origin", "destination",
         ):
             value = content.get(key)
             if value is not None:
@@ -1210,18 +1111,14 @@ def update_booking_context_from_tool_result(
 
         boarding_stops = content.get("boarding_stops")
         dropping_stops = content.get("dropping_stops")
-
         if isinstance(boarding_stops, list):
             updated["boarding_stops"] = boarding_stops
-
         if isinstance(dropping_stops, list):
             updated["dropping_stops"] = dropping_stops
-
         return updated
 
     if tool_name == "check_seat_availability" and isinstance(content, list):
         updated["available_seats"] = content
-        return updated
 
     return updated
 
@@ -1271,7 +1168,7 @@ def tool_node(
         )
 
         # Execute real MCP tool
-        tool_result = asyncio.run(
+        structured_tool_result = asyncio.run(
             call_mcp_tool(
                 tool_name=state["tool_name"],
                 arguments=validated_arguments,
@@ -1280,16 +1177,22 @@ def tool_node(
 
         print("\nMCP tool execution completed.")
 
+        # Keep application state structured. Only the LLM-facing copy is
+        # serialized and wrapped with prompt-injection protection text.
         updated_context = update_booking_context_from_tool_result(
             context=state.get("booking_context", {}),
             tool_name=state["tool_name"],
-            tool_result=tool_result,
+            tool_result=structured_tool_result,
+        )
+
+        tool_result_for_llm = serialize_tool_result_for_llm(
+            structured_tool_result
         )
 
         return {
             "tool_arguments": validated_arguments,
             "booking_context": updated_context,
-            "tool_result": tool_result,
+            "tool_result": tool_result_for_llm,
             "final_response": "",
             "error": "",
         }
@@ -1612,12 +1515,88 @@ builder.add_edge(
 
 
 # ============================================================================
-# LangGraph Checkpointing
+# LangGraph PostgreSQL Checkpointing
 # ============================================================================
 
 
-checkpointer = MemorySaver()
+def _build_postgres_checkpoint_uri() -> str:
+    """Build a psycopg-compatible PostgreSQL URI from the existing .env values."""
+    user = os.getenv("user")
+    password = os.getenv("password")
+    host = os.getenv("host")
+    port = os.getenv("port")
+    dbname = os.getenv("dbname")
 
+    missing = [
+        name
+        for name, value in (
+            ("user", user),
+            ("password", password),
+            ("host", host),
+            ("port", port),
+            ("dbname", dbname),
+        )
+        if not value
+    ]
+    if missing:
+        raise RuntimeError(
+            "Missing PostgreSQL environment variables for LangGraph persistence: "
+            + ", ".join(missing)
+        )
+
+    assert user is not None
+    assert password is not None
+    assert host is not None
+    assert port is not None
+    assert dbname is not None
+
+    return (
+        f"postgresql://{quote_plus(user)}:{quote_plus(password)}@"
+        f"{host}:{port}/{dbname}?sslmode=require"
+    )
+
+
+POSTGRES_CHECKPOINT_URI = _build_postgres_checkpoint_uri()
+
+# Use a Psycopg connection pool instead of holding one PostgreSQL connection
+# for the lifetime of the FastAPI process.
+#
+# PostgresSaver supports ConnectionPool directly. This lets the checkpointer
+# obtain a healthy connection for each database operation and return it to the
+# pool afterward.
+#
+# PostgresSaver expects every connection to use dict_row, so the pool is typed
+# as ConnectionPool[Connection[DictRow]]. The type must be given explicitly
+# because "row_factory" is passed through the untyped `kwargs` dict, which
+# Pylance cannot inspect. ConnectionPool is invariant in its connection type,
+# so the pool and its health check must both use the same Connection[DictRow].
+CheckpointConnection = Connection[DictRow]
+CheckpointPool = ConnectionPool[CheckpointConnection]
+
+checkpoint_pool = CheckpointPool(
+    conninfo=POSTGRES_CHECKPOINT_URI,
+    min_size=1,
+    max_size=5,
+    timeout=30.0,
+    max_idle=300.0,
+    kwargs={
+        "autocommit": True,
+        "prepare_threshold": 0,
+        "row_factory": dict_row,
+    },
+    check=CheckpointPool.check_connection,
+    open=True,
+)
+
+# Fail during application startup if the database cannot provide a working
+# connection instead of discovering the problem on the first chat request.
+checkpoint_pool.wait(timeout=30.0)
+
+checkpointer = PostgresSaver(checkpoint_pool)
+checkpointer.setup()
+
+# Close the pool when the Python process exits.
+atexit.register(checkpoint_pool.close)
 
 graph = builder.compile(
     checkpointer=checkpointer,
