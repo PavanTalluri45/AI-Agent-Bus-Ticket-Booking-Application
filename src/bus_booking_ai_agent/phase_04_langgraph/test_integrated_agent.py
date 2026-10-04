@@ -801,12 +801,13 @@ def memory_node(
     """
     Load memories belonging only to the authenticated user.
     """
-
+    t0 = time.perf_counter()
     memories = get_relevant_memories(state["user_id"])
+    t_elapsed = time.perf_counter() - t0
 
     print_node_banner("MEMORY NODE")
     print(f"User ID: {state['user_id']}")
-    print(f"Memories retrieved: {len(memories)}")
+    print(f"Memories retrieved: {len(memories)} (took {t_elapsed*1000:.1f}ms)")
 
     return {
         "memories": memories,
@@ -1067,29 +1068,23 @@ def create_gemini_interaction(
 ) -> Any:
     """
     Create the next Gemini interaction for the current agent turn.
-
-    There are three possible situations:
-
-    1. No previous Gemini interaction exists.
-       Start a new conversation with the user's message.
-
-    2. A tool was just executed.
-       Continue the Gemini interaction with the tool result.
-
-    3. A previous agent turn already finished.
-       Continue the same Gemini conversation with the new user message.
-
-    Keeping these cases explicit prevents a later user message from being
-    incorrectly sent to Gemini as if it were a tool result.
     """
+    t0 = time.perf_counter()
 
     if not state["interaction_id"]:
-        return client.interactions.create(
+        llm_input = build_llm_input(state)
+        print(f"\n[GEMINI API] REQUEST START (Turn 1 / New interaction)")
+        print(f"[GEMINI API] input length: {len(llm_input)} chars | sys_instruction: {len(AGENT_SYSTEM_INSTRUCTION)} chars | tools: {len(TOOLS)}")
+        res = client.interactions.create(
             model=MODEL,
             system_instruction=AGENT_SYSTEM_INSTRUCTION,
-            input=build_llm_input(state),
+            input=llm_input,
             tools=TOOLS,
         )
+        t_elapsed = time.perf_counter() - t0
+        usage = getattr(res, "usage", None)
+        print(f"[GEMINI API] REQUEST END (New interaction) -> elapsed: {t_elapsed:.2f}s | id: {getattr(res, 'id', 'N/A')} | usage: {usage}")
+        return res
 
     # ------------------------------------------------------------------------
     # Continue after an MCP tool execution
@@ -1112,25 +1107,40 @@ def create_gemini_interaction(
             ],
         }
 
-        return client.interactions.create(
+        print(f"\n[GEMINI API] REQUEST START (Tool continuation)")
+        print(f"[GEMINI API] previous_interaction_id: {state['interaction_id']}")
+        print(f"[GEMINI API] tool: {state['tool_name']} | call_id: {state['tool_call_id']} | tool_result: {len(state['tool_result'])} chars")
+        res = client.interactions.create(
             model=MODEL,
             system_instruction=AGENT_SYSTEM_INSTRUCTION,
             previous_interaction_id=state["interaction_id"],
             input=[function_result],
             tools=TOOLS,
         )
+        t_elapsed = time.perf_counter() - t0
+        usage = getattr(res, "usage", None)
+        print(f"[GEMINI API] REQUEST END (Tool continuation) -> elapsed: {t_elapsed:.2f}s | id: {getattr(res, 'id', 'N/A')} | usage: {usage}")
+        return res
 
     # ------------------------------------------------------------------------
     # Continue after a completed user turn
     # ------------------------------------------------------------------------
 
-    return client.interactions.create(
+    llm_input = build_llm_input(state)
+    print(f"\n[GEMINI API] REQUEST START (User turn continuation)")
+    print(f"[GEMINI API] previous_interaction_id: {state['interaction_id']}")
+    print(f"[GEMINI API] input length: {len(llm_input)} chars | tools: {len(TOOLS)}")
+    res = client.interactions.create(
         model=MODEL,
         system_instruction=AGENT_SYSTEM_INSTRUCTION,
         previous_interaction_id=state["interaction_id"],
-        input=build_llm_input(state),
+        input=llm_input,
         tools=TOOLS,
     )
+    t_elapsed = time.perf_counter() - t0
+    usage = getattr(res, "usage", None)
+    print(f"[GEMINI API] REQUEST END (User turn continuation) -> elapsed: {t_elapsed:.2f}s | id: {getattr(res, 'id', 'N/A')} | usage: {usage}")
+    return res
 
 
 def llm_node(
@@ -1144,7 +1154,7 @@ def llm_node(
 
     Tool arguments are validated immediately after Gemini generates them.
     """
-
+    t_llm_start = time.perf_counter()
     print_node_banner("LLM NODE")
 
     iteration = state["iteration"] + 1
@@ -1225,6 +1235,8 @@ def llm_node(
 
             print(f"Gemini selected allowed tool: {tool_name}")
             print(f"Validated tool arguments: {validated_arguments}")
+            t_llm_elapsed = time.perf_counter() - t_llm_start
+            print(f"[LLM NODE] Iteration {iteration} finished (Tool: {tool_name}) in {t_llm_elapsed:.2f}s")
 
             return {
                 "interaction_id": interaction_id,
@@ -1256,6 +1268,8 @@ def llm_node(
             raise RuntimeError("Gemini returned no final response.")
 
         print("Gemini produced final response.")
+        t_llm_elapsed = time.perf_counter() - t_llm_start
+        print(f"[LLM NODE] Iteration {iteration} finished (Final Response) in {t_llm_elapsed:.2f}s")
 
         return {
             "interaction_id": interaction_id,
@@ -1269,7 +1283,8 @@ def llm_node(
         }
 
     except Exception as error:
-        print(f"LLM error: {error}")
+        t_llm_elapsed = time.perf_counter() - t_llm_start
+        print(f"LLM error (after {t_llm_elapsed:.2f}s): {error}")
 
         return {
             "booking_context": resolved_context,
@@ -1382,11 +1397,13 @@ def tool_node(
         MCP
     """
 
+    t_tool_start = time.perf_counter()
     print_node_banner("TOOL NODE")
     print(f"Requested tool: {state['tool_name']}")
 
     try:
         # Second validation boundary
+        t_val_start = time.perf_counter()
         validated_arguments = validate_tool_arguments(
             tool_name=state["tool_name"],
             arguments=state["tool_arguments"],
@@ -1397,28 +1414,37 @@ def tool_node(
             tool_name=state["tool_name"],
             arguments=validated_arguments,
         )
+        print(f"[TOOL NODE] Argument validation took {(time.perf_counter() - t_val_start)*1000:.1f}ms")
 
         # Execute real MCP tool
+        t_mcp_start = time.perf_counter()
         structured_tool_result = asyncio.run(
             call_mcp_tool(
                 tool_name=state["tool_name"],
                 arguments=validated_arguments,
             )
         )
-
-        print("\nMCP tool execution completed.")
+        t_mcp_elapsed = time.perf_counter() - t_mcp_start
+        print(f"\nMCP tool execution completed in {t_mcp_elapsed:.2f}s.")
 
         # Keep application state structured. Only the LLM-facing copy is
         # serialized and wrapped with prompt-injection protection text.
+        t_ctx_start = time.perf_counter()
         updated_context = update_booking_context_from_tool_result(
             context=state.get("booking_context", {}),
             tool_name=state["tool_name"],
             tool_result=structured_tool_result,
         )
+        print(f"[TOOL NODE] update_booking_context took {(time.perf_counter() - t_ctx_start)*1000:.1f}ms")
 
+        t_ser_start = time.perf_counter()
         tool_result_for_llm = serialize_tool_result_for_llm(
             structured_tool_result
         )
+        print(f"[TOOL NODE] serialize_tool_result took {(time.perf_counter() - t_ser_start)*1000:.1f}ms (length: {len(tool_result_for_llm)} chars)")
+
+        t_total_tool = time.perf_counter() - t_tool_start
+        print(f"[TOOL NODE] Total tool node execution time: {t_total_tool:.2f}s")
 
         return {
             "tool_arguments": validated_arguments,
@@ -1429,7 +1455,8 @@ def tool_node(
         }
 
     except Exception as error:
-        print(f"Tool error: {error}")
+        t_total_tool = time.perf_counter() - t_tool_start
+        print(f"Tool error (after {t_total_tool:.2f}s): {error}")
 
         return {
             "tool_result": "",
@@ -1887,7 +1914,9 @@ def run_agent(
     # ------------------------------------------------------------------------
 
     else:
+        t_cp_read = time.perf_counter()
         checkpoint = graph.get_state(config)
+        print(f"[CHECKPOINT] State read took {(time.perf_counter() - t_cp_read)*1000:.1f}ms")
         existing_state = checkpoint.values or {}
 
         existing_booking_context = cast(
@@ -1917,10 +1946,12 @@ def run_agent(
                 "approval_status": "none",
             }
 
+            t_invoke = time.perf_counter()
             result = graph.invoke(
                 initial_state,
                 config=config,
             )
+            print(f"[GRAPH INVOKE] Initial turn took {(time.perf_counter() - t_invoke):.2f}s")
 
         # --------------------------------------------------------------------
         # Security: never allow a conversation thread to switch users
@@ -1963,10 +1994,12 @@ def run_agent(
                 "approval_status": existing_state.get("approval_status", "none"),
             }
 
+            t_invoke = time.perf_counter()
             result = graph.invoke(
                 continued_state,
                 config=config,
             )
+            print(f"[GRAPH INVOKE] Continued turn took {(time.perf_counter() - t_invoke):.2f}s")
 
     elapsed_time = time.perf_counter() - start_time
     print(f"\n[AGENT RESPONSE TIME] Completed in {elapsed_time:.2f} seconds ({elapsed_time * 1000:.1f} ms)")
