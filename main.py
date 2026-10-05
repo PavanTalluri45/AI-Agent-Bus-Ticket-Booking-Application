@@ -1,3 +1,4 @@
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -391,7 +392,8 @@ async def verify_payment_endpoint(
 
 
 class AgentChatRequest(BaseModel):
-    message: str = Field(min_length=1)
+    message: str = Field(default="")
+    approval_decision: Literal["approve", "reject"] | None = None
 
 
 class UpdateMemoryRequest(BaseModel):
@@ -449,6 +451,12 @@ def chat_with_agent(
             },
         )
 
+    if not chat_request.message.strip() and chat_request.approval_decision is None:
+        raise HTTPException(
+            status_code=400,
+            detail="message must not be empty unless an approval_decision is provided.",
+        )
+
     conversation_id = request.cookies.get("bus_booking_conversation_id")
 
     if not conversation_id:
@@ -467,15 +475,21 @@ def chat_with_agent(
 
     result = run_agent(
         current_user=current_user,
-        user_message=chat_request.message,
+        user_message=chat_request.message or (chat_request.approval_decision or ""),
         thread_id=thread_id,
+        approval_decision=chat_request.approval_decision,
     )
 
-    return {
+    response_payload = {
         "success": True,
         "conversation_id": conversation_id,
         "response": result["final_response"],
     }
+    if result.get("__interrupt__"):
+        response_payload["approval_required"] = True
+
+    return response_payload
+
 
 
 

@@ -4,7 +4,7 @@ import json
 import os
 import sys
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict, cast
 from urllib.parse import quote_plus
@@ -28,6 +28,17 @@ from bus_booking_ai_agent.config.gemini import MODEL, client
 from bus_booking_ai_agent.phase_05_memory.memory_context import (
     get_relevant_memories,
 )
+from bus_booking_ai_agent.services.hold_service import (
+    HoldConflictError,
+    HoldError,
+    InvalidJourneySegmentError,
+    ScheduleNotFoundError,
+    ScheduleUnavailableError,
+    SeatNotAvailableError,
+    create_hold,
+    release_hold,
+)
+
 
 
 # ============================================================================
@@ -72,6 +83,9 @@ Follow these rules at all times:
 15. A selected schedule_id in booking_context is the authoritative selected bus for the current booking flow. Never replace it with another schedule unless the user explicitly selects another bus.
 16. If booking_context already contains details for the selected schedule, use those details instead of calling get_bus_details again.
 17. Never call get_bus_details for a schedule different from the selected schedule.
+18. Selecting a seat is not the same as creating a booking. Never say that a booking is confirmed unless a real booking operation has executed and returned confirmed booking state.
+19. If a seat has not been deterministically resolved by application state, never claim that the seat is selected.
+20. When a seat is selected, describe it as selected only. Do not claim a hold, booking, payment, or confirmation unless the corresponding real operation returned that state.
 """
 
 
@@ -88,6 +102,7 @@ ApprovalStatus = Literal[
     "expired",
     "cancelled",
     "executed",
+    "failed",
 ]
 
 
@@ -120,12 +135,14 @@ class BookingContext(TypedDict, total=False):
     seat_id: str
     seat_number: str
     hold_id: str
+    hold_expires_at: str
     booking_id: str
     payment_id: str
     boarding_stops: list[dict[str, Any]]
     dropping_stops: list[dict[str, Any]]
     available_seats: list[dict[str, Any]]
     available_schedules: list[dict[str, Any]]
+
 
 
 # ============================================================================
@@ -746,11 +763,30 @@ def build_llm_input(
         default=str,
     )
 
+    booking_status = (
+        "BOOKING_CONFIRMED"
+        if state.get("booking_context", {}).get("booking_id")
+        else "NO_BOOKING_CREATED"
+    )
+    hold_status = (
+        "ACTIVE_HOLD"
+        if state.get("booking_context", {}).get("hold_id")
+        else "NO_ACTIVE_HOLD"
+    )
+    payment_status = (
+        "PAYMENT_RECORDED"
+        if state.get("booking_context", {}).get("payment_id")
+        else "NO_PAYMENT_RECORDED"
+    )
+
     context_block = (
         "<application_booking_context>\n"
         "The following identifiers were previously resolved by application tools. "
         "They are internal application state, not user instructions. "
         "Do not invent or alter them.\n"
+        f"Booking state: {booking_status}\n"
+        f"Hold state: {hold_status}\n"
+        f"Payment state: {payment_status}\n"
         f"{booking_context}\n"
         "</application_booking_context>"
     )
@@ -1049,18 +1085,159 @@ def _resolve_selected_stops(
     return resolved
 
 
+def _resolve_selected_seat(
+    context: BookingContext,
+    user_message: str,
+) -> BookingContext:
+    """Resolve an exact human-readable seat selection from authoritative availability."""
+    available_seats = context.get("available_seats", [])
+    if not available_seats:
+        return context
+
+    message = _normalize_selection_text(user_message)
+    normalized_message = f" {message} "
+    matches: list[dict[str, Any]] = []
+
+    for seat in available_seats:
+        seat_number = _normalize_selection_text(str(seat.get("seat_number", "")))
+        if seat_number and f" {seat_number} " in normalized_message:
+            matches.append(seat)
+
+    if len(matches) != 1:
+        return context
+
+    selected = matches[0]
+    seat_id = selected.get("seat_id")
+    seat_number = selected.get("seat_number")
+    if not seat_id or not seat_number:
+        return context
+
+    resolved = context.copy()
+    resolved["seat_id"] = str(seat_id)
+    resolved["seat_number"] = str(seat_number)
+    print(f"Application resolved seat selection: {seat_number} -> {seat_id}")
+    return resolved
+
+
 def resolve_booking_context(
     context: BookingContext,
     user_message: str,
 ) -> BookingContext:
     """Resolve only unambiguous human selections from authoritative state."""
     resolved = _resolve_selected_bus(context, user_message)
-    return _resolve_selected_stops(resolved, user_message)
+    resolved = _resolve_selected_stops(resolved, user_message)
+    return _resolve_selected_seat(resolved, user_message)
+
+
+# ============================================================================
+# Hold Lifecycle & Integrity Helpers
+# ============================================================================
+
+
+def is_hold_expired(context: BookingContext) -> bool:
+    """
+    Check if the hold recorded in booking context has expired.
+
+    Timezone-aware check against UTC.
+    """
+    expires_at_str = context.get("hold_expires_at")
+    if not expires_at_str:
+        return False
+    try:
+        expires_at = datetime.fromisoformat(expires_at_str)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) >= expires_at
+    except Exception:
+        return False
+
+
+def verify_pending_action_matches_context(
+    pending_action: PendingAction | None,
+    context: BookingContext,
+) -> bool:
+    """
+    Verify that the pending action still matches authoritative booking context.
+
+    Prevents approving a hold for Seat A when context shifted to Seat B.
+    """
+    if not pending_action or pending_action.get("action") != "create_seat_hold":
+        return False
+
+    args = pending_action.get("arguments", {})
+    required_keys = (
+        "schedule_id",
+        "seat_id",
+        "boarding_stop_id",
+        "dropping_stop_id",
+    )
+    for key in required_keys:
+        expected = str(args.get(key) or "")
+        actual = str(context.get(key) or "")
+        if not expected or not actual or expected != actual:
+            return False
+
+    return True
+
+
+def handle_context_change_hold_release(
+    previous_context: BookingContext,
+    current_context: BookingContext,
+    current_user: AuthenticatedUser,
+) -> BookingContext:
+    """
+    Explicitly release an active database hold if the journey context changed.
+
+    Triggers when the user changes seat, bus, boarding stop, or dropping stop
+    while an active hold exists. Clears stale hold fields from the context.
+    """
+    old_hold_id = previous_context.get("hold_id")
+    if not old_hold_id:
+        return current_context
+
+    # Check if any part of the journey or seat changed
+    keys_to_compare = (
+        "schedule_id",
+        "seat_id",
+        "boarding_stop_id",
+        "dropping_stop_id",
+    )
+    context_changed = any(
+        current_context.get(k) != previous_context.get(k)
+        for k in keys_to_compare
+        if current_context.get(k) is not None or previous_context.get(k) is not None
+    )
+
+    if context_changed:
+        try:
+            released = release_hold(
+                current_user=current_user,
+                hold_id=UUID(old_hold_id),
+            )
+            if released:
+                print(
+                    f"\n[HOLD RELEASED] Active hold {old_hold_id} "
+                    f"successfully released in database due to context change."
+                )
+            else:
+                print(
+                    f"\n[HOLD RELEASE] Hold {old_hold_id} was already released or inactive."
+                )
+        except Exception as error:
+            print(f"\n[HOLD RELEASE ERROR] Failed to release hold {old_hold_id}: {error}")
+
+        updated = current_context.copy()
+        updated.pop("hold_id", None)
+        updated.pop("hold_expires_at", None)
+        return updated
+
+    return current_context
 
 
 # ============================================================================
 # LLM Node
 # ============================================================================
+
 
 
 def create_gemini_interaction(
@@ -1145,6 +1322,7 @@ def create_gemini_interaction(
 
 def llm_node(
     state: AgentState,
+    config: RunnableConfig,
 ) -> AgentUpdate:
     """
     Ask Gemini to either:
@@ -1170,6 +1348,80 @@ def llm_node(
             user_message=state["user_message"],
         )
 
+        # Explicitly release active database hold if the journey or seat changed
+        current_user: AuthenticatedUser | None = config.get("configurable", {}).get("current_user")
+        if current_user:
+            resolved_context = handle_context_change_hold_release(
+                previous_context=state.get("booking_context", {}),
+                current_context=resolved_context,
+                current_user=current_user,
+            )
+
+        # Check if the existing hold in context has expired
+        if resolved_context.get("hold_id") and is_hold_expired(resolved_context):
+            expired_time = resolved_context.get("hold_expires_at", "")
+            seat_num = resolved_context.get("seat_number", "")
+            print(f"\n[HOLD EXPIRED] Hold {resolved_context.get('hold_id')} expired at {expired_time}")
+            resolved_context = resolved_context.copy()
+            resolved_context.pop("hold_id", None)
+            resolved_context.pop("hold_expires_at", None)
+            return {
+                "booking_context": resolved_context,
+                "tool_name": "",
+                "tool_call_id": "",
+                "tool_arguments": {},
+                "pending_action": None,
+                "approval_status": "expired",
+                "tool_result": "",
+                "final_response": (
+                    f"Your 10-minute hold on Seat {seat_num} expired at {expired_time}. "
+                    "Seat availability must be verified again before placing a new hold. "
+                    "Please check seat availability to see open seats."
+                ),
+                "iteration": iteration,
+                "error": "",
+            }
+
+        # Check if a valid seat is newly resolved and unheld: stage single explicit approval
+        new_seat_id = resolved_context.get("seat_id")
+        if (
+            new_seat_id
+            and resolved_context.get("schedule_id")
+            and resolved_context.get("boarding_stop_id")
+            and resolved_context.get("dropping_stop_id")
+            and not resolved_context.get("hold_id")
+            and state.get("approval_status") not in {"approved", "executed"}
+        ):
+            pending_action: PendingAction = {
+                "action": "create_seat_hold",
+                "arguments": {
+                    "schedule_id": resolved_context.get("schedule_id", ""),
+                    "seat_id": resolved_context.get("seat_id", ""),
+                    "boarding_stop_id": resolved_context.get("boarding_stop_id", ""),
+                    "dropping_stop_id": resolved_context.get("dropping_stop_id", ""),
+                    "seat_number": resolved_context.get("seat_number", ""),
+                    "bus_number": resolved_context.get("bus_number", ""),
+                    "operator_name": resolved_context.get("operator_name", ""),
+                    "bus_type": resolved_context.get("bus_type", ""),
+                    "origin": resolved_context.get("origin", ""),
+                    "destination": resolved_context.get("destination", ""),
+                    "travel_date": resolved_context.get("travel_date", ""),
+                },
+            }
+            print(f"\n[SEAT RESOLUTION] Staged single confirmation for seat {resolved_context.get('seat_number')}")
+            return {
+                "booking_context": resolved_context,
+                "tool_name": "",
+                "tool_call_id": "",
+                "tool_arguments": {},
+                "pending_action": pending_action,
+                "approval_status": "pending",
+                "tool_result": "",
+                "final_response": "",
+                "iteration": iteration,
+                "error": "",
+            }
+
         # Keep the value statically typed as AgentState.
         # Pylance infers plain dict[str, object] from dict(state), which is
         # broader than the AgentState TypedDict expected by create_gemini_interaction().
@@ -1179,6 +1431,7 @@ def llm_node(
             state_for_llm["booking_context"] = resolved_context
 
         response = create_gemini_interaction(state_for_llm)
+
 
         interaction_id = getattr(response, "id", "") or ""
         steps = getattr(response, "steps", None) or []
@@ -1329,6 +1582,10 @@ def update_booking_context_from_tool_result(
             "boarding_stops",
             "dropping_stops",
             "available_seats",
+            "seat_id",
+            "seat_number",
+            "hold_id",
+            "hold_expires_at",
         ):
             updated.pop(key, None)
 
@@ -1376,6 +1633,7 @@ def update_booking_context_from_tool_result(
 
 def tool_node(
     state: AgentState,
+    config: RunnableConfig,
 ) -> AgentUpdate:
     """
     Execute the validated tool through MCP.
@@ -1402,6 +1660,22 @@ def tool_node(
     print(f"Requested tool: {state['tool_name']}")
 
     try:
+        # If performing a new search while having an active hold, release it in DB first
+        if state["tool_name"] == "search_buses":
+            old_hold_id = state.get("booking_context", {}).get("hold_id")
+            if old_hold_id:
+                current_user: AuthenticatedUser | None = config.get("configurable", {}).get("current_user")
+                if current_user:
+                    try:
+                        released = release_hold(
+                            current_user=current_user,
+                            hold_id=UUID(old_hold_id),
+                        )
+                        if released:
+                            print(f"\n[HOLD RELEASED] Active hold {old_hold_id} released due to new bus search.")
+                    except Exception as err:
+                        print(f"\n[HOLD RELEASE ERROR] Failed to release hold on new search: {err}")
+
         # Second validation boundary
         t_val_start = time.perf_counter()
         validated_arguments = validate_tool_arguments(
@@ -1426,6 +1700,7 @@ def tool_node(
         )
         t_mcp_elapsed = time.perf_counter() - t_mcp_start
         print(f"\nMCP tool execution completed in {t_mcp_elapsed:.2f}s.")
+
 
         # Keep application state structured. Only the LLM-facing copy is
         # serialized and wrapped with prompt-injection protection text.
@@ -1598,30 +1873,43 @@ def approval_node(
             "error": "",
         }
 
+    args = pending_action.get("arguments", {})
+    seat_num = args.get("seat_number", "selected seat")
+    operator = args.get("operator_name", "the bus")
+    bus_type = args.get("bus_type", "")
+    origin = args.get("origin", "")
+    dest = args.get("destination", "")
+    route_desc = f" ({origin} to {dest})" if origin and dest else ""
+    type_desc = f" ({bus_type})" if bus_type else ""
+
+    prompt_message = (
+        f"You have selected Seat {seat_num} on {operator}{type_desc}{route_desc}. "
+        "Would you like to place a 10-minute temporary hold on this seat? "
+        "Please confirm with approve or reject."
+    )
+
     print_node_banner("HITL APPROVAL NODE")
     print(f"Action awaiting approval: {pending_action['action']}")
+    print(f"Prompt: {prompt_message}")
 
     decision = interrupt(
         {
             "type": "approval_request",
             "action": pending_action["action"],
             "arguments": pending_action["arguments"],
-            "message": (
-                "Human approval is required before this consequential "
-                "action can continue."
-            ),
+            "message": prompt_message,
         }
     )
 
     if decision == "approve":
-        print("Human approval received: approve")
+        print("\nHuman approval received: approve")
         return {
             "approval_status": "approved",
             "error": "",
         }
 
     if decision == "reject":
-        print("Human approval received: reject")
+        print("\nHuman approval received: reject")
         return {
             "approval_status": "rejected",
             "error": "",
@@ -1630,6 +1918,204 @@ def approval_node(
     raise ValueError(
         "Invalid HITL approval decision. Expected 'approve' or 'reject'."
     )
+
+
+# ============================================================================
+# Hold Execution Node
+# ============================================================================
+
+
+def hold_execution_node(
+    state: AgentState,
+    config: RunnableConfig,
+) -> AgentUpdate:
+    """
+    Execute or cancel a seat hold after explicit human-in-the-loop approval.
+
+    The authenticated user is retrieved from the runtime config, never from
+    client input or Gemini output.
+    """
+    print_node_banner("HOLD EXECUTION NODE")
+    approval_status = state.get("approval_status")
+    print(f"Approval status: {approval_status}")
+
+    # Rejection handling
+    if approval_status == "rejected":
+        print("\n[HOLD EXECUTION] User rejected the hold request.")
+        return {
+            "pending_action": None,
+            "approval_status": "rejected",
+            "final_response": (
+                "Seat hold request was cancelled. No hold has been created. "
+                "You can select another seat or search for different buses whenever you're ready."
+            ),
+            "error": "",
+        }
+
+    if approval_status != "approved":
+        print(f"\n[HOLD EXECUTION ERROR] Invalid approval status: {approval_status}")
+        return {
+            "pending_action": None,
+            "approval_status": "failed",
+            "final_response": "The hold operation was not authorized.",
+            "error": f"Invalid approval status: {approval_status}",
+        }
+
+    # Verify runtime user
+    current_user: AuthenticatedUser | None = config.get("configurable", {}).get("current_user")
+    if not current_user:
+        print("\n[HOLD EXECUTION ERROR] Missing authenticated user in runtime config.")
+        return {
+            "pending_action": None,
+            "approval_status": "failed",
+            "final_response": "Authentication error during hold execution.",
+            "error": "Missing authenticated user in runtime config.",
+        }
+
+    context: BookingContext = state.get("booking_context", {}).copy()
+    pending_action = state.get("pending_action")
+
+    # Verify pending action integrity against current booking context
+    if not verify_pending_action_matches_context(pending_action, context):
+        print("\n[HOLD EXECUTION ERROR] Pending action does not match current booking context.")
+        return {
+            "pending_action": None,
+            "approval_status": "failed",
+            "final_response": (
+                "The booking context changed after approval was requested. "
+                "The hold was not executed. Please review your selection and confirm again."
+            ),
+            "error": "Pending action mismatch with booking context.",
+        }
+
+    # Verify required identifiers exist
+    schedule_id_str = context.get("schedule_id")
+    seat_id_str = context.get("seat_id")
+    boarding_id_str = context.get("boarding_stop_id")
+    dropping_id_str = context.get("dropping_stop_id")
+
+    if not (schedule_id_str and seat_id_str and boarding_id_str and dropping_id_str):
+        return {
+            "pending_action": None,
+            "approval_status": "failed",
+            "final_response": "Missing journey segment or seat details required to create a hold.",
+            "error": "Incomplete booking context for hold creation.",
+        }
+
+    # Check if a hold is already active for this exact seat
+    if context.get("hold_id") and not is_hold_expired(context):
+        expires_at_str = context.get("hold_expires_at", "")
+        seat_num = context.get("seat_number", "")
+        return {
+            "pending_action": None,
+            "approval_status": "executed",
+            "final_response": (
+                f"Seat {seat_num} is already held for you until {expires_at_str}. "
+                "Would you like to provide passenger details to proceed with your booking?"
+            ),
+            "error": "",
+        }
+
+    seat_num = context.get("seat_number", "")
+    operator = context.get("operator_name", "")
+
+    try:
+        t_hold_start = time.perf_counter()
+        hold = create_hold(
+            current_user=current_user,
+            schedule_id=UUID(schedule_id_str),
+            seat_id=UUID(seat_id_str),
+            boarding_stop_id=UUID(boarding_id_str),
+            dropping_stop_id=UUID(dropping_id_str),
+        )
+        t_hold_elapsed = time.perf_counter() - t_hold_start
+        print(f"\n[HOLD CREATED] Database hold created in {t_hold_elapsed*1000:.1f}ms: ID={hold['id']}")
+
+        hold_id = str(hold["id"])
+        hold_expires_at = hold["expires_at"].isoformat()
+
+        context.update({"hold_id": hold_id, "hold_expires_at": hold_expires_at})
+
+        expires_display = (
+            hold["expires_at"].strftime("%H:%M UTC")
+            if hasattr(hold["expires_at"], "strftime")
+            else hold_expires_at
+        )
+
+        final_response = (
+            f"Seat {seat_num} on {operator} has been successfully held for you! "
+            f"This hold is active until {expires_display} (10 minutes). "
+            "Please note: A hold is a temporary reservation, not a confirmed ticket. "
+            "Would you like to provide passenger details to proceed with your booking?"
+        )
+
+        return {
+            "booking_context": context,
+            "pending_action": None,
+            "approval_status": "executed",
+            "final_response": final_response,
+            "error": "",
+        }
+
+    except HoldConflictError as error:
+        print(f"\n[HOLD CONFLICT] {error}")
+        context.pop("seat_id", None)
+        context.pop("seat_number", None)
+        return {
+            "booking_context": context,
+            "pending_action": None,
+            "approval_status": "failed",
+            "final_response": (
+                f"Seat {seat_num} was just held by another passenger for an overlapping journey. "
+                "Please check seat availability and select another open seat."
+            ),
+            "error": "",
+        }
+
+    except SeatNotAvailableError as error:
+        print(f"\n[SEAT NOT AVAILABLE] {error}")
+        context.pop("seat_id", None)
+        context.pop("seat_number", None)
+        return {
+            "booking_context": context,
+            "pending_action": None,
+            "approval_status": "failed",
+            "final_response": (
+                f"Seat {seat_num} is no longer available on this bus. "
+                "Please select another seat from the available list."
+            ),
+            "error": "",
+        }
+
+    except (ScheduleNotFoundError, ScheduleUnavailableError) as error:
+        print(f"\n[SCHEDULE ERROR] {error}")
+        return {
+            "booking_context": context,
+            "pending_action": None,
+            "approval_status": "failed",
+            "final_response": "This bus schedule is no longer available. Please search for other buses.",
+            "error": "",
+        }
+
+    except InvalidJourneySegmentError as error:
+        print(f"\n[SEGMENT ERROR] {error}")
+        return {
+            "booking_context": context,
+            "pending_action": None,
+            "approval_status": "failed",
+            "final_response": "The selected boarding or dropping stop is invalid for this schedule.",
+            "error": "",
+        }
+
+    except Exception as error:
+        print(f"\n[HOLD EXECUTION UNEXPECTED ERROR] {error}")
+        return {
+            "booking_context": context,
+            "pending_action": None,
+            "approval_status": "failed",
+            "final_response": f"A database error occurred while creating your seat hold: {error}",
+            "error": str(error),
+        }
 
 
 # ============================================================================
@@ -1655,6 +2141,26 @@ def error_node(
             f"The agent encountered an error: {state['error']}"
         ),
     }
+
+
+# ============================================================================
+# Approval Routing
+# ============================================================================
+
+
+def route_after_approval(
+    state: AgentState,
+) -> Literal[
+    "hold_execution",
+    "error",
+]:
+    """
+    Route after human approval decision.
+    """
+    approval_status = state.get("approval_status")
+    if approval_status in {"approved", "rejected"}:
+        return "hold_execution"
+    return "error"
 
 
 # ============================================================================
@@ -1689,6 +2195,11 @@ builder.add_node(
 builder.add_node(
     "approval",
     approval_node,
+)
+
+builder.add_node(
+    "hold_execution",
+    hold_execution_node,
 )
 
 builder.add_node(
@@ -1736,16 +2247,21 @@ builder.add_conditional_edges(
 # ---------------------------------------------------------------------------
 # Approval routing
 # ---------------------------------------------------------------------------
-#
-# HITL currently stops after recording the human decision. A real
-# consequential action executor will be connected here only after the
-# corresponding action tool exists. This prevents approval from accidentally
-# executing a non-existent or fake booking operation.
+
+builder.add_conditional_edges(
+    "approval",
+    route_after_approval,
+    {
+        "hold_execution": "hold_execution",
+        "error": "error",
+    },
+)
 
 builder.add_edge(
-    "approval",
+    "hold_execution",
     END,
 )
+
 
 
 # ---------------------------------------------------------------------------
@@ -1885,7 +2401,7 @@ def run_agent(
     arbitrary client input.
     """
 
-    if not user_message.strip():
+    if not user_message.strip() and approval_decision is None:
         raise ValueError("user_message must not be empty.")
 
     if not thread_id.strip():
@@ -1894,6 +2410,7 @@ def run_agent(
     config: RunnableConfig = {
         "configurable": {
             "thread_id": thread_id,
+            "current_user": current_user,
         }
     }
 
@@ -1904,6 +2421,35 @@ def run_agent(
     # ------------------------------------------------------------------------
 
     if approval_decision is not None:
+        t_cp_read = time.perf_counter()
+        checkpoint = graph.get_state(config)
+        print(f"[CHECKPOINT] State read for resume took {(time.perf_counter() - t_cp_read)*1000:.1f}ms")
+        existing_state = checkpoint.values or {}
+
+        if not existing_state:
+            raise ValueError("Cannot resume approval on a non-existent conversation thread.")
+
+        existing_user_id = existing_state.get("user_id")
+        if existing_user_id != str(current_user.id):
+            raise PermissionError("Conversation thread does not belong to the authenticated user.")
+
+        is_awaiting_approval = False
+        if checkpoint.tasks:
+            for task in checkpoint.tasks:
+                if getattr(task, "interrupts", None):
+                    is_awaiting_approval = True
+                    break
+        if not is_awaiting_approval and existing_state.get("approval_status") != "pending":
+            raise ValueError("Conversation thread is not awaiting human approval.")
+
+        pending_action = existing_state.get("pending_action")
+        if not pending_action or pending_action.get("action") != "create_seat_hold":
+            raise ValueError("No valid seat hold pending action found to approve.")
+
+        existing_context = existing_state.get("booking_context", {})
+        if not verify_pending_action_matches_context(pending_action, existing_context):
+            raise ValueError("The pending action does not match the current booking context.")
+
         result = graph.invoke(
             Command(resume=approval_decision),
             config=config,
@@ -2001,10 +2547,19 @@ def run_agent(
             )
             print(f"[GRAPH INVOKE] Continued turn took {(time.perf_counter() - t_invoke):.2f}s")
 
+    # If the workflow paused at an interrupt, extract the prompt message for the user
+    interrupts = result.get("__interrupt__")
+    if interrupts and isinstance(interrupts, (list, tuple)) and len(interrupts) > 0:
+        first_interrupt = interrupts[0]
+        interrupt_val = getattr(first_interrupt, "value", None)
+        if isinstance(interrupt_val, dict) and "message" in interrupt_val:
+            result["final_response"] = interrupt_val["message"]
+
     elapsed_time = time.perf_counter() - start_time
     print(f"\n[AGENT RESPONSE TIME] Completed in {elapsed_time:.2f} seconds ({elapsed_time * 1000:.1f} ms)")
 
     return result
+
 
 
 # ============================================================================

@@ -455,3 +455,36 @@ def create_hold(
         hold = result.mappings().one()
 
         return dict(hold)
+
+
+def release_hold(
+    current_user: AuthenticatedUser,
+    hold_id: UUID,
+) -> bool:
+    """
+    Explicitly release an active seat hold in the database.
+
+    Ensures that only an active hold belonging to the authenticated user
+    is released. Idempotent and safe against repeated calls. Returns True
+    if an active owned hold was released, False otherwise.
+    """
+    with engine.begin() as connection:
+        result = connection.execute(
+            text(
+                """
+                UPDATE seat_holds
+                SET status = 'RELEASED',
+                    released_at = CURRENT_TIMESTAMP
+                WHERE id = :hold_id
+                  AND auth_user_id = :auth_user_id
+                  AND status = 'ACTIVE'
+                RETURNING id;
+                """
+            ),
+            {
+                "hold_id": hold_id,
+                "auth_user_id": current_user.id,
+            },
+        )
+
+        return result.fetchone() is not None
