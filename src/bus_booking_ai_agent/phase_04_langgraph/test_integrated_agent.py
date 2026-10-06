@@ -2389,23 +2389,48 @@ def run_agent(
     approval_decision: Literal["approve", "reject"] | None = None,
 ) -> dict[str, Any]:
     """
-    Run the integrated agent for an authenticated user.
+    Run the integrated bus-booking agent.
 
-    The LangGraph thread is the source of workflow state for this
-    conversation. The Gemini interaction ID stored in that state is reused
-    so later user messages continue the same Gemini conversation.
+    There are two execution modes:
 
-    IMPORTANT SECURITY RULE:
+    1. Normal user message
+       Runs the existing LangGraph conversation for this thread.
 
-    The user ID comes from Supabase authentication. It is never accepted as
-    arbitrary client input.
+    2. Human approval resume
+       Resumes a previously interrupted seat-hold workflow with
+       ``Command(resume="approve")`` or ``Command(resume="reject")``.
+
+    Security rules:
+
+    - ``current_user`` comes from Supabase authentication.
+    - The client never supplies the user ID.
+    - A thread must belong to the authenticated user.
+    - Approval can only resume a real pending seat-hold action.
+    - The pending action must still match the booking context.
+    - Database mutation happens only inside ``hold_execution_node``.
     """
 
+    # ========================================================================
+    # Input validation
+    # ========================================================================
+
     if not user_message.strip() and approval_decision is None:
-        raise ValueError("user_message must not be empty.")
+        raise ValueError(
+            "user_message must not be empty unless an approval_decision is provided."
+        )
 
     if not thread_id.strip():
         raise ValueError("thread_id must not be empty.")
+
+    # ========================================================================
+    # Runtime configuration
+    # ========================================================================
+    #
+    # ``current_user`` is runtime-only authentication context. It is passed
+    # through RunnableConfig so hold_execution_node() can use the authenticated
+    # user without putting the full AuthenticatedUser object into checkpointed
+    # application state.
+    # ========================================================================
 
     config: RunnableConfig = {
         "configurable": {
@@ -2416,65 +2441,240 @@ def run_agent(
 
     start_time = time.perf_counter()
 
-    # ------------------------------------------------------------------------
-    # Resume an interrupted HITL workflow
-    # ------------------------------------------------------------------------
+    # ========================================================================
+    # HUMAN APPROVAL RESUME
+    # ========================================================================
 
     if approval_decision is not None:
-        t_cp_read = time.perf_counter()
+        print_node_banner("HUMAN APPROVAL RESUME")
+        print(f"Thread ID: {thread_id}")
+        print(f"Decision: {approval_decision}")
+
+        # --------------------------------------------------------------------
+        # Load the persisted workflow state.
+        # --------------------------------------------------------------------
+
+        checkpoint_start = time.perf_counter()
         checkpoint = graph.get_state(config)
-        print(f"[CHECKPOINT] State read for resume took {(time.perf_counter() - t_cp_read)*1000:.1f}ms")
+        checkpoint_time = (time.perf_counter() - checkpoint_start) * 1000
+
+        print(
+            f"[CHECKPOINT] Approval state read took "
+            f"{checkpoint_time:.1f}ms"
+        )
+
         existing_state = checkpoint.values or {}
 
+        # --------------------------------------------------------------------
+        # A valid approval must belong to an existing conversation.
+        # --------------------------------------------------------------------
+
         if not existing_state:
-            raise ValueError("Cannot resume approval on a non-existent conversation thread.")
+            raise ValueError(
+                "Cannot resume approval on a non-existent conversation thread. "
+                "Start the booking flow first."
+            )
+
+        # --------------------------------------------------------------------
+        # Thread ownership check.
+        # --------------------------------------------------------------------
 
         existing_user_id = existing_state.get("user_id")
+
         if existing_user_id != str(current_user.id):
-            raise PermissionError("Conversation thread does not belong to the authenticated user.")
+            raise PermissionError(
+                "Conversation thread does not belong to the authenticated user."
+            )
 
-        is_awaiting_approval = False
-        if checkpoint.tasks:
-            for task in checkpoint.tasks:
-                if getattr(task, "interrupts", None):
-                    is_awaiting_approval = True
-                    break
-        if not is_awaiting_approval and existing_state.get("approval_status") != "pending":
-            raise ValueError("Conversation thread is not awaiting human approval.")
+        # --------------------------------------------------------------------
+        # Read persisted HITL state.
+        # --------------------------------------------------------------------
 
-        pending_action = existing_state.get("pending_action")
-        if not pending_action or pending_action.get("action") != "create_seat_hold":
-            raise ValueError("No valid seat hold pending action found to approve.")
+        approval_status = existing_state.get(
+            "approval_status",
+            "none",
+        )
 
-        existing_context = existing_state.get("booking_context", {})
-        if not verify_pending_action_matches_context(pending_action, existing_context):
-            raise ValueError("The pending action does not match the current booking context.")
+        pending_action = existing_state.get(
+            "pending_action"
+        )
+
+        booking_context = cast(
+            BookingContext,
+            existing_state.get(
+                "booking_context",
+                {},
+            ),
+        )
+
+        print(
+            f"[APPROVAL] Current status: {approval_status}"
+        )
+        print(
+            f"[APPROVAL] Pending action: {pending_action}"
+        )
+
+        # --------------------------------------------------------------------
+        # Idempotency protection.
+        # --------------------------------------------------------------------
+        #
+        # If the hold was already created successfully and is still active,
+        # do not create another hold when the client retries the approval.
+        #
+        # This check intentionally happens BEFORE the ``pending`` check because
+        # a successfully executed workflow has approval_status="executed".
+        # --------------------------------------------------------------------
+
+        if (
+            approval_decision == "approve"
+            and approval_status == "executed"
+            and booking_context.get("hold_id")
+            and not is_hold_expired(booking_context)
+        ):
+            seat_number = booking_context.get(
+                "seat_number",
+                "your selected seat",
+            )
+
+            operator_name = booking_context.get(
+                "operator_name",
+                "the selected bus",
+            )
+
+            hold_expires_at = booking_context.get(
+                "hold_expires_at",
+                "",
+            )
+
+            expires_display = hold_expires_at
+
+            try:
+                expires_display = datetime.fromisoformat(
+                    hold_expires_at
+                ).strftime("%H:%M UTC")
+            except (TypeError, ValueError):
+                pass
+
+            print(
+                "[APPROVAL] Active hold already exists. "
+                "Returning idempotent result."
+            )
+
+            return {
+                "booking_context": booking_context,
+                "final_response": (
+                    f"Seat {seat_number} on {operator_name} "
+                    f"is already held for you until {expires_display}. "
+                    "This is a temporary seat hold, not a confirmed ticket."
+                ),
+                "approval_status": "executed",
+            }
+
+        # --------------------------------------------------------------------
+        # IMPORTANT FIX:
+        #
+        # The application-level approval_status is the authoritative indicator
+        # that a seat-hold approval is pending.
+        #
+        # Do NOT additionally require checkpoint.tasks[*].interrupts here.
+        # Persisted LangGraph task metadata can vary depending on checkpoint
+        # state/version, while approval_status is explicitly maintained by our
+        # own workflow.
+        # --------------------------------------------------------------------
+
+        if approval_status != "pending":
+            raise ValueError(
+                "Conversation thread is not awaiting human approval. "
+                f"Current approval status: '{approval_status}'. "
+                "Complete the seat-selection and hold-confirmation step "
+                "before sending an approval decision."
+            )
+
+        # --------------------------------------------------------------------
+        # Verify that a real seat-hold action is waiting for approval.
+        # --------------------------------------------------------------------
+
+        if not isinstance(pending_action, dict):
+            raise ValueError(
+                "No valid pending action exists for this conversation."
+            )
+
+        if pending_action.get("action") != "create_seat_hold":
+            raise ValueError(
+                "The pending action is not a seat-hold operation."
+            )
+
+        # LangGraph checkpoint values are dynamically typed at runtime.
+        # Narrow the validated dictionary to the application's TypedDict so
+        # Pylance can verify the call safely.
+        validated_pending_action: PendingAction = cast(
+            PendingAction,
+            pending_action,
+        )
+
+        # --------------------------------------------------------------------
+        # Prevent stale approval from acting on changed booking state.
+        # --------------------------------------------------------------------
+
+        if not verify_pending_action_matches_context(
+            validated_pending_action,
+            booking_context,
+        ):
+            raise ValueError(
+                "The pending approval no longer matches the current booking "
+                "context. Please select the seat again and request a new hold."
+            )
+
+        # --------------------------------------------------------------------
+        # Resume the actual interrupted LangGraph execution.
+        # --------------------------------------------------------------------
+
+        print(
+            "[APPROVAL] Resuming interrupted graph..."
+        )
 
         result = graph.invoke(
-            Command(resume=approval_decision),
+            Command(
+                resume=approval_decision
+            ),
             config=config,
         )
 
-    # ------------------------------------------------------------------------
-    # Load the existing checkpoint for this conversation
-    # ------------------------------------------------------------------------
-
-    else:
-        t_cp_read = time.perf_counter()
-        checkpoint = graph.get_state(config)
-        print(f"[CHECKPOINT] State read took {(time.perf_counter() - t_cp_read)*1000:.1f}ms")
-        existing_state = checkpoint.values or {}
-
-        existing_booking_context = cast(
-            BookingContext,
-            existing_state.get("booking_context", {}),
+        print(
+            "[APPROVAL] Graph resumed successfully."
         )
 
+    # ========================================================================
+    # NORMAL USER MESSAGE
+    # ========================================================================
+
+    else:
+        print_node_banner("NORMAL AGENT REQUEST")
+
         # --------------------------------------------------------------------
-        # First message in this conversation
+        # Load the current conversation checkpoint.
         # --------------------------------------------------------------------
 
+        checkpoint_start = time.perf_counter()
+        checkpoint = graph.get_state(config)
+        checkpoint_time = (time.perf_counter() - checkpoint_start) * 1000
+
+        print(
+            f"[CHECKPOINT] State read took "
+            f"{checkpoint_time:.1f}ms"
+        )
+
+        existing_state = checkpoint.values or {}
+
+        # ====================================================================
+        # FIRST MESSAGE
+        # ====================================================================
+
         if not existing_state:
+            print(
+                "[CHECKPOINT] No existing state. Starting new conversation."
+            )
+
             initial_state: AgentState = {
                 "user_id": str(current_user.id),
                 "user_message": user_message,
@@ -2492,19 +2692,30 @@ def run_agent(
                 "approval_status": "none",
             }
 
-            t_invoke = time.perf_counter()
+            invoke_start = time.perf_counter()
+
             result = graph.invoke(
                 initial_state,
                 config=config,
             )
-            print(f"[GRAPH INVOKE] Initial turn took {(time.perf_counter() - t_invoke):.2f}s")
 
-        # --------------------------------------------------------------------
-        # Security: never allow a conversation thread to switch users
-        # --------------------------------------------------------------------
+            print(
+                f"[GRAPH INVOKE] Initial turn took "
+                f"{time.perf_counter() - invoke_start:.2f}s"
+            )
+
+        # ====================================================================
+        # EXISTING CONVERSATION
+        # ====================================================================
 
         else:
-            existing_user_id = existing_state.get("user_id")
+            # ----------------------------------------------------------------
+            # Security: a thread belongs to exactly one authenticated user.
+            # ----------------------------------------------------------------
+
+            existing_user_id = existing_state.get(
+                "user_id"
+            )
 
             if existing_user_id != str(current_user.id):
                 raise PermissionError(
@@ -2512,23 +2723,26 @@ def run_agent(
                 )
 
             # ----------------------------------------------------------------
-            # Continue the existing conversation
+            # Preserve authoritative booking state and Gemini interaction ID.
             # ----------------------------------------------------------------
-            #
-            # Preserve the authoritative conversation state, especially the Gemini
-            # interaction ID. Reset only fields that belong to the previous graph
-            # execution step.
-            #
-            # The previous tool result must be cleared. Otherwise create_gemini_
-            # interaction() could mistake the next user's message for a continuation
-            # of the old tool call.
+
+            existing_booking_context = cast(
+                BookingContext,
+                existing_state.get(
+                    "booking_context",
+                    {},
+                ),
+            )
 
             continued_state: AgentState = {
                 "user_id": str(current_user.id),
                 "user_message": user_message,
                 "memories": [],
                 "booking_context": existing_booking_context,
-                "interaction_id": existing_state.get("interaction_id", ""),
+                "interaction_id": existing_state.get(
+                    "interaction_id",
+                    "",
+                ),
                 "tool_name": "",
                 "tool_call_id": "",
                 "tool_arguments": {},
@@ -2536,31 +2750,74 @@ def run_agent(
                 "final_response": "",
                 "iteration": 0,
                 "error": "",
-                "pending_action": existing_state.get("pending_action"),
-                "approval_status": existing_state.get("approval_status", "none"),
+                "pending_action": existing_state.get(
+                    "pending_action"
+                ),
+                "approval_status": existing_state.get(
+                    "approval_status",
+                    "none",
+                ),
             }
 
-            t_invoke = time.perf_counter()
+            invoke_start = time.perf_counter()
+
             result = graph.invoke(
                 continued_state,
                 config=config,
             )
-            print(f"[GRAPH INVOKE] Continued turn took {(time.perf_counter() - t_invoke):.2f}s")
 
-    # If the workflow paused at an interrupt, extract the prompt message for the user
-    interrupts = result.get("__interrupt__")
-    if interrupts and isinstance(interrupts, (list, tuple)) and len(interrupts) > 0:
+            print(
+                f"[GRAPH INVOKE] Continued turn took "
+                f"{time.perf_counter() - invoke_start:.2f}s"
+            )
+
+    # ========================================================================
+    # INTERRUPT RESPONSE
+    # ========================================================================
+    #
+    # LangGraph returns an __interrupt__ entry when approval_node() pauses at
+    # interrupt(). Convert the interrupt payload into the normal API response
+    # text while preserving the interrupt metadata in the result.
+    # ========================================================================
+
+    interrupts = result.get(
+        "__interrupt__"
+    )
+
+    if (
+        isinstance(interrupts, (list, tuple))
+        and interrupts
+    ):
         first_interrupt = interrupts[0]
-        interrupt_val = getattr(first_interrupt, "value", None)
-        if isinstance(interrupt_val, dict) and "message" in interrupt_val:
-            result["final_response"] = interrupt_val["message"]
+        interrupt_value = getattr(
+            first_interrupt,
+            "value",
+            None,
+        )
 
-    elapsed_time = time.perf_counter() - start_time
-    print(f"\n[AGENT RESPONSE TIME] Completed in {elapsed_time:.2f} seconds ({elapsed_time * 1000:.1f} ms)")
+        if (
+            isinstance(interrupt_value, dict)
+            and isinstance(
+                interrupt_value.get("message"),
+                str,
+            )
+        ):
+            result["final_response"] = interrupt_value[
+                "message"
+            ]
+
+    # ========================================================================
+    # Final timing
+    # ========================================================================
+
+    elapsed = time.perf_counter() - start_time
+
+    print(
+        f"[AGENT RESPONSE TIME] Completed in "
+        f"{elapsed:.2f}s ({elapsed * 1000:.1f}ms)"
+    )
 
     return result
-
-
 
 # ============================================================================
 # Direct Execution Protection

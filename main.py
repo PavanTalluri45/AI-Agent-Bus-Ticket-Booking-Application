@@ -392,8 +392,15 @@ async def verify_payment_endpoint(
 
 
 class AgentChatRequest(BaseModel):
-    message: str = Field(default="")
-    approval_decision: Literal["approve", "reject"] | None = None
+    """Request body for a normal agent conversation message."""
+
+    message: str = Field(min_length=1)
+
+
+class AgentApprovalRequest(BaseModel):
+    """Request body for resuming a pending human approval."""
+
+    approval_decision: Literal["approve", "reject"]
 
 
 class UpdateMemoryRequest(BaseModel):
@@ -415,23 +422,40 @@ class DeleteMemoryRequest(BaseModel):
     memory_key: str = Field(min_length=1)
 
 
-@app.post("/api/v1/chat")
-def chat_with_agent(
+def _get_conversation_context(
     request: Request,
     response: Response,
-    chat_request: AgentChatRequest,
-    current_user: AuthenticatedUser = Depends(get_current_user),
-):
+    current_user: AuthenticatedUser,
+) -> tuple[str, str]:
     """
-    Run the bus-booking agent for the authenticated user.
+    Get or create the browser conversation ID and build its LangGraph thread ID.
 
-    The client sends only the user's message. The backend manages the
-    conversation identifier through an HttpOnly cookie so the user never
-    needs to enter or know the conversation ID.
-
-    The conversation identifier is scoped into the LangGraph thread with
-    the authenticated Supabase user ID.
+    The conversation ID is stored in an HttpOnly cookie. The authenticated
+    Supabase user ID is always included in the LangGraph thread ID so one user
+    cannot address another user's conversation thread.
     """
+
+    conversation_id = request.cookies.get("bus_booking_conversation_id")
+
+    if not conversation_id:
+        conversation_id = str(uuid4())
+
+        response.set_cookie(
+            key="bus_booking_conversation_id",
+            value=conversation_id,
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            max_age=60 * 60 * 24 * 30,
+        )
+
+    thread_id = f"{current_user.id}:{conversation_id}"
+
+    return conversation_id, thread_id
+
+
+def _check_agent_rate_limit(current_user: AuthenticatedUser) -> None:
+    """Apply the agent chat rate limit to both normal and approval requests."""
 
     rate_limit = check_rate_limit(
         user_id=str(current_user.id),
@@ -451,46 +475,119 @@ def chat_with_agent(
             },
         )
 
-    if not chat_request.message.strip() and chat_request.approval_decision is None:
+
+# ============================================================
+# Agent Chat: Normal Message
+# ============================================================
+
+
+@app.post("/api/v1/chat")
+def chat_with_agent(
+    request: Request,
+    response: Response,
+    chat_request: AgentChatRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Send a normal user message to the bus-booking AI agent.
+
+    This endpoint is intentionally responsible only for normal conversation
+    messages. Human approval is handled by /api/v1/chat/approval.
+    """
+
+    _check_agent_rate_limit(current_user)
+
+    conversation_id, thread_id = _get_conversation_context(
+        request=request,
+        response=response,
+        current_user=current_user,
+    )
+
+    try:
+        result = run_agent(
+            current_user=current_user,
+            user_message=chat_request.message.strip(),
+            thread_id=thread_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        )
+    except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail="message must not be empty unless an approval_decision is provided.",
+            detail=str(exc),
         )
-
-    conversation_id = request.cookies.get("bus_booking_conversation_id")
-
-    if not conversation_id:
-        conversation_id = str(uuid4())
-
-        response.set_cookie(
-            key="bus_booking_conversation_id",
-            value=conversation_id,
-            httponly=True,
-            secure=False,
-            samesite="lax",
-            max_age=60 * 60 * 24 * 30,
-        )
-
-    thread_id = f"{current_user.id}:{conversation_id}"
-
-    result = run_agent(
-        current_user=current_user,
-        user_message=chat_request.message or (chat_request.approval_decision or ""),
-        thread_id=thread_id,
-        approval_decision=chat_request.approval_decision,
-    )
 
     response_payload = {
         "success": True,
         "conversation_id": conversation_id,
         "response": result["final_response"],
     }
+
     if result.get("__interrupt__"):
         response_payload["approval_required"] = True
 
     return response_payload
 
 
+# ============================================================
+# Agent Chat: Human Approval
+# ============================================================
+
+
+@app.post("/api/v1/chat/approval")
+def approve_agent_action(
+    request: Request,
+    response: Response,
+    approval_request: AgentApprovalRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Approve or reject a pending human-in-the-loop agent action.
+
+    This endpoint must only be called after /api/v1/chat returns
+    approval_required=true. It resumes the existing LangGraph thread and
+    never starts a new conversation.
+    """
+
+    _check_agent_rate_limit(current_user)
+
+    conversation_id, thread_id = _get_conversation_context(
+        request=request,
+        response=response,
+        current_user=current_user,
+    )
+
+    try:
+        result = run_agent(
+            current_user=current_user,
+            user_message=approval_request.approval_decision,
+            thread_id=thread_id,
+            approval_decision=approval_request.approval_decision,
+        )
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=str(exc),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+    response_payload = {
+        "success": True,
+        "conversation_id": conversation_id,
+        "response": result["final_response"],
+    }
+
+    if result.get("__interrupt__"):
+        response_payload["approval_required"] = True
+
+    return response_payload
 
 
 # ============================================================
