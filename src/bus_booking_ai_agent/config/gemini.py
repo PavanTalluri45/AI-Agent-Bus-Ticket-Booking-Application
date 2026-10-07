@@ -10,7 +10,7 @@ from google.genai import types
 load_dotenv()
 
 # Keep the confirmed working model for the Interactions API
-MODEL = "gemini-3.6-flash"
+MODEL = "gemini-3.5-flash-lite"
 
 # HTTP status codes that must never trigger failover
 NON_RETRYABLE_STATUS_CODES = {400, 401, 403, 404, 422}

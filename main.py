@@ -554,11 +554,14 @@ def approve_agent_action(
 
     _check_agent_rate_limit(current_user)
 
-    conversation_id, thread_id = _get_conversation_context(
-        request=request,
-        response=response,
-        current_user=current_user,
-    )
+    conversation_id = request.cookies.get("bus_booking_conversation_id")
+    if not conversation_id:
+        raise HTTPException(
+            status_code=400,
+            detail="No active conversation thread found to approve. Start a booking flow first.",
+        )
+
+    thread_id = f"{current_user.id}:{conversation_id}"
 
     try:
         result = run_agent(
