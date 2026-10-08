@@ -1,6 +1,7 @@
 import os
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -15,10 +16,16 @@ from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
     AgentState,
     BookingContext,
     build_seat_hold_pending_action,
+    ensure_selected_schedule_details,
+    format_stop_selection_prompt,
     graph,
+    llm_node,
+    resolve_booking_context,
     run_agent,
+    update_booking_context_from_tool_result,
     verify_pending_action_matches_context,
 )
+import bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent as integrated_agent
 from bus_booking_ai_agent.services.hold_service import release_hold
 
 
@@ -151,6 +158,194 @@ def test_seat_selection_does_not_hold_or_interrupt(base_booking_context):
 
     # Verify conversational response was returned
     assert result.get("final_response") != ""
+
+
+def test_availability_persistence_updates_authoritative_journey_context(base_booking_context):
+    """Seat availability must persist the selected journey IDs and clear stale seat picks."""
+    availability_result = {
+        "result": [
+            {"seat_id": SEAT_ID, "seat_number": SEAT_NUMBER, "seat_type": "SEATER"},
+            {"seat_id": ALT_SEAT_ID, "seat_number": ALT_SEAT_NUMBER, "seat_type": "SEATER"},
+        ]
+    }
+    context = base_booking_context.copy()
+    context["seat_id"] = ALT_SEAT_ID
+    context["seat_number"] = ALT_SEAT_NUMBER
+
+    updated = update_booking_context_from_tool_result(
+        context=context,
+        tool_name="check_seat_availability",
+        tool_result=availability_result,
+        tool_arguments={
+            "schedule_id": SCHEDULE_ID,
+            "boarding_stop_id": BOARDING_STOP_ID,
+            "dropping_stop_id": DROPPING_STOP_ID,
+        },
+    )
+
+    assert updated["schedule_id"] == SCHEDULE_ID
+    assert updated["boarding_stop_id"] == BOARDING_STOP_ID
+    assert updated["dropping_stop_id"] == DROPPING_STOP_ID
+    assert updated["available_seats"] == availability_result["result"]
+    assert updated.get("seat_id") is None
+    assert updated.get("seat_number") is None
+
+
+def test_selected_schedule_details_load_stop_options(monkeypatch):
+    """A newly selected schedule is hydrated with its authoritative route stops."""
+    schedule_context: BookingContext = {
+        "schedule_id": SCHEDULE_ID,
+        "available_schedules": [{"schedule_id": SCHEDULE_ID}],
+    }
+
+    async def fake_call_mcp_tool(tool_name, arguments):
+        assert tool_name == "get_bus_details"
+        assert arguments == {"schedule_id": SCHEDULE_ID}
+        return {
+            "result": {
+                "schedule_id": SCHEDULE_ID,
+                "boarding_stops": [
+                    {"stop_id": BOARDING_STOP_ID, "stop_name": "Hyderabad"},
+                ],
+                "dropping_stops": [
+                    {"stop_id": DROPPING_STOP_ID, "stop_name": "Bangalore"},
+                ],
+            }
+        }
+
+    monkeypatch.setattr(integrated_agent, "call_mcp_tool", fake_call_mcp_tool)
+
+    hydrated = ensure_selected_schedule_details(schedule_context)
+
+    assert hydrated["boarding_stops"] == [
+        {"stop_id": BOARDING_STOP_ID, "stop_name": "Hyderabad"},
+    ]
+    assert hydrated["dropping_stops"] == [
+        {"stop_id": DROPPING_STOP_ID, "stop_name": "Bangalore"},
+    ]
+    assert "Boarding stops: Hyderabad" in format_stop_selection_prompt(hydrated)
+    assert "Drop-off stops: Bangalore" in format_stop_selection_prompt(hydrated)
+
+
+def test_switching_schedules_clears_previous_route_choices():
+    """Stops and seats from one schedule must not leak into another selection."""
+    context: BookingContext = {
+        "schedule_id": SCHEDULE_ID,
+        "boarding_stop_id": BOARDING_STOP_ID,
+        "boarding_stops": [
+            {"stop_id": BOARDING_STOP_ID, "stop_name": "Old boarding point"},
+        ],
+        "dropping_stop_id": DROPPING_STOP_ID,
+        "dropping_stops": [
+            {"stop_id": DROPPING_STOP_ID, "stop_name": "Old drop-off point"},
+        ],
+        "available_seats": [{"seat_id": SEAT_ID, "seat_number": SEAT_NUMBER}],
+        "seat_id": SEAT_ID,
+        "seat_number": SEAT_NUMBER,
+        "available_schedules": [
+            {"schedule_id": SCHEDULE_ID, "operator_name": "Kaveri Travels"},
+            {
+                "schedule_id": "00000000-0000-0000-0000-000000000002",
+                "operator_name": "Morning Star Travels",
+            },
+        ],
+    }
+
+    resolved = resolve_booking_context(context, "I want option 2")
+
+    assert resolved["schedule_id"] == "00000000-0000-0000-0000-000000000002"
+    assert "boarding_stops" not in resolved
+    assert "dropping_stops" not in resolved
+    assert "boarding_stop_id" not in resolved
+    assert "dropping_stop_id" not in resolved
+    assert "available_seats" not in resolved
+    assert "seat_id" not in resolved
+
+
+def test_availability_request_without_stop_selection_asks_user(monkeypatch):
+    """Missing segment choices should not become a guardrail error or MCP call."""
+    async def fake_call_mcp_tool(tool_name, arguments):
+        assert tool_name == "get_bus_details"
+        return {
+            "result": {
+                "schedule_id": SCHEDULE_ID,
+                "boarding_stops": [
+                    {"stop_id": BOARDING_STOP_ID, "stop_name": "Hyderabad"},
+                ],
+                "dropping_stops": [
+                    {"stop_id": DROPPING_STOP_ID, "stop_name": "Bangalore"},
+                ],
+            }
+        }
+
+    response = SimpleNamespace(
+        id="interaction-id",
+        steps=[
+            SimpleNamespace(
+                type="function_call",
+                name="check_seat_availability",
+                arguments={},
+                id="call-id",
+            )
+        ],
+    )
+    monkeypatch.setattr(integrated_agent, "call_mcp_tool", fake_call_mcp_tool)
+    monkeypatch.setattr(
+        integrated_agent,
+        "create_gemini_interaction",
+        lambda state: response,
+    )
+
+    state: AgentState = {
+        "user_id": str(TEST_USER_ID),
+        "user_message": "Show me available seats",
+        "memories": [],
+        "booking_context": {
+            "schedule_id": SCHEDULE_ID,
+            "available_schedules": [{"schedule_id": SCHEDULE_ID}],
+        },
+        "interaction_id": "",
+        "tool_name": "",
+        "tool_call_id": "",
+        "tool_arguments": {},
+        "tool_result": "",
+        "final_response": "",
+        "iteration": 0,
+        "error": "",
+        "pending_action": None,
+        "approval_status": "none",
+    }
+
+    result = llm_node(state, {})
+
+    assert not result["error"]
+    assert not result["tool_name"]
+    assert "Boarding stops: Hyderabad" in result["final_response"]
+    assert "Drop-off stops: Bangalore" in result["final_response"]
+    assert result["booking_context"]["boarding_stops"]
+
+
+def test_hold_context_does_not_require_available_seats(base_booking_context):
+    """A hold should validate only the authoritative IDs, not the whole available-seats list."""
+    hold_context: BookingContext = {
+        "schedule_id": SCHEDULE_ID,
+        "seat_id": SEAT_ID,
+        "seat_number": SEAT_NUMBER,
+        "boarding_stop_id": BOARDING_STOP_ID,
+        "dropping_stop_id": DROPPING_STOP_ID,
+        "origin": "Bangalore",
+        "destination": "Chennai",
+        "travel_date": "2026-09-20",
+        "available_seats": [],
+    }
+
+    pending_action = build_seat_hold_pending_action(hold_context)
+
+    assert pending_action["action"] == "create_seat_hold"
+    assert pending_action["arguments"]["schedule_id"] == SCHEDULE_ID
+    assert pending_action["arguments"]["seat_id"] == SEAT_ID
+    assert pending_action["arguments"]["boarding_stop_id"] == BOARDING_STOP_ID
+    assert pending_action["arguments"]["dropping_stop_id"] == DROPPING_STOP_ID
 
 
 def test_incomplete_context_hold_request_returns_advisory(base_booking_context):
@@ -543,4 +738,3 @@ def test_fastapi_endpoints_separation_and_cookie_guard():
 
     finally:
         app.dependency_overrides.clear()
-

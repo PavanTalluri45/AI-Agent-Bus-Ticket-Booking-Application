@@ -90,13 +90,14 @@ Follow these rules at all times:
 15. A selected schedule_id in booking_context is the authoritative selected bus for the current booking flow. Never replace it with another schedule unless the user explicitly selects another bus.
 16. If booking_context already contains details for the selected schedule, use those details instead of calling get_bus_details again.
 17. Never call get_bus_details for a schedule different from the selected schedule.
-18. Selecting a seat is not the same as creating a booking. Never say that a booking is confirmed unless a real booking operation has executed and returned confirmed booking state.
-19. If a seat has not been deterministically resolved by application state, never claim that the seat is selected.
-20. When a seat is selected, describe it as selected only. Do not claim a hold, booking, payment, or confirmation unless the corresponding real operation returned that state.
-21. When the user selects a seat (e.g. "I want seat 1B", "Select seat 2A"), confirm the seat selection conversationally and inform the user they can request a temporary hold when they are ready. Never call create_seat_hold merely because a seat was selected.
-22. Call the create_seat_hold tool ONLY when the user explicitly requests to hold, reserve, lock, or proceed with holding the selected seat (e.g. "Please hold seat 1B", "Hold my seat", "Reserve this seat", "Lock this seat", "Can you hold this seat for me?", "Proceed with holding this seat").
-23. The create_seat_hold tool takes no arguments ({}). Never invent or provide UUIDs, schedule IDs, seat IDs, or stop IDs. All identifiers are resolved by the application from authoritative application state.
-24. Do not ask redundant confirmation questions before calling create_seat_hold when the user has already asked to hold or reserve the seat. The application workflow manages human approval directly.
+18. Seat availability is specific to a journey segment. Before checking it, make sure the user has selected both a boarding stop and a dropping stop from the selected schedule's details. If either is missing, ask the user to choose from the returned stop names; never choose stops on the user's behalf.
+19. Selecting a seat is not the same as creating a booking. Never say that a booking is confirmed unless a real booking operation has executed and returned confirmed booking state.
+20. If a seat has not been deterministically resolved by application state, never claim that the seat is selected.
+21. When a seat is selected, describe it as selected only. Do not claim a hold, booking, payment, or confirmation unless the corresponding real operation returned that state.
+22. When the user selects a seat (e.g. "I want seat 1B", "Select seat 2A"), confirm the seat selection conversationally and inform the user they can request a temporary hold when they are ready. Never call create_seat_hold merely because a seat was selected.
+23. Call the create_seat_hold tool ONLY when the user explicitly requests to hold, reserve, lock, or proceed with holding the selected seat (e.g. "Please hold seat 1B", "Hold my seat", "Reserve this seat", "Lock this seat", "Can you hold this seat for me?", "Proceed with holding this seat").
+24. The create_seat_hold tool takes no arguments ({}). Never invent or provide UUIDs, schedule IDs, seat IDs, or stop IDs. All identifiers are resolved by the application from authoritative application state.
+25. Do not ask redundant confirmation questions before calling create_seat_hold when the user has already asked to hold or reserve the seat. The application workflow manages human approval directly.
 """
 
 
@@ -309,7 +310,9 @@ TOOLS = [
         "name": "check_seat_availability",
         "description": (
             "Check available seats for a scheduled bus "
-            "and a specific journey segment."
+            "and a specific journey segment. Only call this after the user "
+            "has selected a boarding stop and a dropping stop from the "
+            "selected schedule's details."
         ),
         "parameters": {
             "type": "object",
@@ -576,7 +579,13 @@ def validate_arguments_against_booking_context(
 
         if not boarding_ids:
             raise ToolGuardrailError(
-                "Boarding stops are not available for the selected schedule."
+                "Boarding stop options have not been loaded for the selected schedule."
+            )
+
+        selected_boarding_id = context.get("boarding_stop_id")
+        if not selected_boarding_id or arguments["boarding_stop_id"] != selected_boarding_id:
+            raise ToolGuardrailError(
+                "The user must select a boarding stop before seat availability can be checked."
             )
 
         if arguments["boarding_stop_id"] not in boarding_ids:
@@ -586,7 +595,13 @@ def validate_arguments_against_booking_context(
 
         if not dropping_ids:
             raise ToolGuardrailError(
-                "Dropping stops are not available for the selected schedule."
+                "Dropping stop options have not been loaded for the selected schedule."
+            )
+
+        selected_dropping_id = context.get("dropping_stop_id")
+        if not selected_dropping_id or arguments["dropping_stop_id"] != selected_dropping_id:
+            raise ToolGuardrailError(
+                "The user must select a dropping stop before seat availability can be checked."
             )
 
         if arguments["dropping_stop_id"] not in dropping_ids:
@@ -971,6 +986,39 @@ def _resolve_selected_bus(
 
     message = _normalize_selection_text(user_message)
 
+    def select_candidate(
+        selected: dict[str, Any],
+        schedule_id: Any,
+    ) -> BookingContext:
+        resolved = context.copy()
+        if str(context.get("schedule_id", "")) != str(schedule_id):
+            for key in (
+                "boarding_stop_id",
+                "boarding_stop_name",
+                "dropping_stop_id",
+                "dropping_stop_name",
+                "boarding_stops",
+                "dropping_stops",
+                "available_seats",
+                "seat_id",
+                "seat_number",
+            ):
+                resolved.pop(key, None)
+
+        resolved["schedule_id"] = str(schedule_id)
+        for key in (
+            "bus_number",
+            "operator_name",
+            "bus_type",
+            "travel_date",
+            "origin",
+            "destination",
+        ):
+            value = selected.get(key)
+            if value is not None:
+                resolved[key] = str(value)
+        return resolved
+
     # Explicit ordinal selections such as "first bus" or "option 2".
     ordinal = None
     ordinal_patterns = {
@@ -1000,12 +1048,7 @@ def _resolve_selected_bus(
             selected = candidates[ordinal]
             schedule_id = selected.get("schedule_id")
             if schedule_id:
-                resolved = context.copy()
-                resolved["schedule_id"] = str(schedule_id)
-                for key in ("bus_number", "operator_name", "bus_type", "travel_date", "origin", "destination"):
-                    value = selected.get(key)
-                    if value is not None:
-                        resolved[key] = str(value)
+                resolved = select_candidate(selected, schedule_id)
                 print(f"Application resolved bus selection to schedule: {schedule_id}")
                 return resolved
         return context
@@ -1042,12 +1085,7 @@ def _resolve_selected_bus(
     if not schedule_id:
         return context
 
-    resolved = context.copy()
-    resolved["schedule_id"] = str(schedule_id)
-    for key in ("bus_number", "operator_name", "bus_type", "travel_date", "origin", "destination"):
-        value = selected.get(key)
-        if value is not None:
-            resolved[key] = str(value)
+    resolved = select_candidate(selected, schedule_id)
 
     print(f"Application resolved bus selection to schedule: {schedule_id}")
     return resolved
@@ -1139,6 +1177,25 @@ def resolve_booking_context(
     resolved = _resolve_selected_bus(context, user_message)
     resolved = _resolve_selected_stops(resolved, user_message)
     return _resolve_selected_seat(resolved, user_message)
+
+
+def prepare_seat_hold_context(
+    context: BookingContext,
+) -> BookingContext:
+    """Normalize and trim the authoritative identifiers needed for a seat hold."""
+    normalized = context.copy()
+
+    for field in (
+        "schedule_id",
+        "seat_id",
+        "boarding_stop_id",
+        "dropping_stop_id",
+    ):
+        value = normalized.get(field)
+        if value is not None:
+            normalized[field] = str(value).strip()
+
+    return normalized
 
 
 # ============================================================================
@@ -1360,6 +1417,12 @@ def llm_node(
             user_message=state["user_message"],
         )
 
+        resolved_context = ensure_selected_schedule_details(resolved_context)
+        resolved_context = resolve_booking_context(
+            context=resolved_context,
+            user_message=state["user_message"],
+        )
+
         # Explicitly release active database hold if the journey or seat changed
         current_user: AuthenticatedUser | None = config.get("configurable", {}).get("current_user")
         if current_user:
@@ -1435,6 +1498,24 @@ def llm_node(
                     "Gemini returned non-object tool arguments."
                 )
 
+            if tool_name == "check_seat_availability" and (
+                not resolved_context.get("boarding_stop_id")
+                or not resolved_context.get("dropping_stop_id")
+            ):
+                return {
+                    "interaction_id": interaction_id,
+                    "booking_context": resolved_context,
+                    "tool_name": "",
+                    "tool_call_id": "",
+                    "tool_arguments": {},
+                    "tool_result": "",
+                    "final_response": format_stop_selection_prompt(
+                        resolved_context
+                    ),
+                    "iteration": iteration,
+                    "error": "",
+                }
+
             # ----------------------------------------------------------------
             # Application Action Tool: create_seat_hold
             # ----------------------------------------------------------------
@@ -1445,19 +1526,25 @@ def llm_node(
                 except Exception as val_err:
                     raise ToolGuardrailError(str(val_err)) from val_err
 
-                # Verify context completeness
-                missing_parts: list[str] = []
-                if not resolved_context.get("schedule_id"):
-                    missing_parts.append("a bus schedule")
-                if not resolved_context.get("boarding_stop_id"):
-                    missing_parts.append("a boarding stop")
-                if not resolved_context.get("dropping_stop_id"):
-                    missing_parts.append("a dropping stop")
-                if not resolved_context.get("seat_id"):
-                    missing_parts.append("an available seat")
+                hold_context = prepare_seat_hold_context(resolved_context)
+                print("[ACTION SIGNAL] Hold context:")
+                print(json.dumps(hold_context, indent=2, default=str))
 
-                if missing_parts:
-                    missing_str = ", ".join(missing_parts)
+                # Verify context completeness using only the authoritative IDs
+                # required to create a hold. available_seats is not required here;
+                # it is only used earlier to resolve a human-readable seat number.
+                missing_fields: list[str] = []
+                for field in (
+                    "schedule_id",
+                    "seat_id",
+                    "boarding_stop_id",
+                    "dropping_stop_id",
+                ):
+                    if not hold_context.get(field):
+                        missing_fields.append(field)
+
+                if missing_fields:
+                    missing_str = ", ".join(missing_fields)
                     print(f"[ACTION SIGNAL] Incomplete context for hold: missing {missing_str}")
                     return {
                         "interaction_id": interaction_id,
@@ -1469,7 +1556,7 @@ def llm_node(
                         "approval_status": "none",
                         "tool_result": "",
                         "final_response": (
-                            f"I cannot place a temporary seat hold yet because {missing_str} has not been selected. "
+                            f"I cannot place a temporary seat hold yet because {missing_str} has not been resolved. "
                             "Please complete your selection first."
                         ),
                         "iteration": iteration,
@@ -1477,9 +1564,9 @@ def llm_node(
                     }
 
                 # Check if hold already active and not expired
-                if resolved_context.get("hold_id") and not is_hold_expired(resolved_context):
-                    seat_num = resolved_context.get("seat_number", "")
-                    expires_at_str = resolved_context.get("hold_expires_at", "")
+                if hold_context.get("hold_id") and not is_hold_expired(hold_context):
+                    seat_num = hold_context.get("seat_number", "")
+                    expires_at_str = hold_context.get("hold_expires_at", "")
                     return {
                         "interaction_id": interaction_id,
                         "booking_context": resolved_context,
@@ -1500,7 +1587,7 @@ def llm_node(
 
                 # Build pending action from authoritative booking context
                 pending_action_dict = build_seat_hold_pending_action(
-                    cast(Any, resolved_context)
+                    cast(Any, hold_context)
                 )
                 pending_action: PendingAction = {
                     "action": pending_action_dict["action"],
@@ -1631,6 +1718,7 @@ def update_booking_context_from_tool_result(
     context: BookingContext,
     tool_name: str,
     tool_result: dict[str, Any],
+    tool_arguments: dict[str, Any] | None = None,
 ) -> BookingContext:
     """Persist authoritative application data from a structured MCP result."""
     updated: BookingContext = context.copy()
@@ -1693,9 +1781,85 @@ def update_booking_context_from_tool_result(
         return updated
 
     if tool_name == "check_seat_availability" and isinstance(content, list):
+        arguments = tool_arguments or {}
+
+        if arguments.get("schedule_id"):
+            updated["schedule_id"] = str(arguments["schedule_id"])
+        if arguments.get("boarding_stop_id"):
+            updated["boarding_stop_id"] = str(arguments["boarding_stop_id"])
+        if arguments.get("dropping_stop_id"):
+            updated["dropping_stop_id"] = str(arguments["dropping_stop_id"])
+
         updated["available_seats"] = content
 
+        # A fresh availability check invalidates an old seat selection.
+        updated.pop("seat_id", None)
+        updated.pop("seat_number", None)
+
     return updated
+
+
+def ensure_selected_schedule_details(
+    context: BookingContext,
+) -> BookingContext:
+    """Load authoritative stop options once a schedule is selected."""
+    schedule_id = context.get("schedule_id")
+    if not schedule_id:
+        return context
+
+    if "boarding_stops" in context and "dropping_stops" in context:
+        return context
+
+    details_result = asyncio.run(
+        call_mcp_tool(
+            tool_name="get_bus_details",
+            arguments={"schedule_id": str(schedule_id)},
+        )
+    )
+    details = details_result.get("result")
+    if details is None:
+        raise ToolGuardrailError(
+            "Details could not be loaded for the selected bus schedule."
+        )
+
+    return update_booking_context_from_tool_result(
+        context=context,
+        tool_name="get_bus_details",
+        tool_result=details_result,
+        tool_arguments={"schedule_id": str(schedule_id)},
+    )
+
+
+def format_stop_selection_prompt(
+    context: BookingContext,
+) -> str:
+    """Ask for the explicit route segment needed for seat availability."""
+
+    def format_stops(stops: list[dict[str, Any]]) -> str:
+        names = [
+            str(stop.get("stop_name", "")).strip()
+            for stop in stops
+            if str(stop.get("stop_name", "")).strip()
+        ]
+        return ", ".join(names) if names else "none returned"
+
+    boarding_stops = format_stops(context.get("boarding_stops", []))
+    dropping_stops = format_stops(context.get("dropping_stops", []))
+
+    if boarding_stops == "none returned" or dropping_stops == "none returned":
+        return (
+            "I couldn't find boarding and drop-off stop options for this bus, "
+            "so I can't check segment-specific seat availability. Please try "
+            "another bus or contact support."
+        )
+
+    return (
+        "Seat availability depends on the journey segment. Please choose "
+        "where you want to board and where you want to get off.\n"
+        f"Boarding stops: {boarding_stops}.\n"
+        f"Drop-off stops: {dropping_stops}.\n"
+        "For example: \"Board from <stop> and drop at <stop>.\""
+    )
 
 
 # ============================================================================
@@ -1781,6 +1945,7 @@ def tool_node(
             context=state.get("booking_context", {}),
             tool_name=state["tool_name"],
             tool_result=structured_tool_result,
+            tool_arguments=validated_arguments,
         )
         print(f"[TOOL NODE] update_booking_context took {(time.perf_counter() - t_ctx_start)*1000:.1f}ms")
 
