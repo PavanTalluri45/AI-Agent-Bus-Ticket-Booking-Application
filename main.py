@@ -1,5 +1,5 @@
 from typing import Literal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
@@ -73,6 +73,11 @@ from bus_booking_ai_agent.services.payment_service import (
 
 from bus_booking_ai_agent.services.razorpay_provider import (
     RazorpayProvider,
+)
+
+from bus_booking_ai_agent.services.booking_finalization_models import (
+    BookingFinalizationError,
+    finalize_booking,
 )
 
 
@@ -318,18 +323,18 @@ async def create_payment_endpoint(
 # ============================================================
 
 
+class FinalizePaymentRequest(BaseModel):
+    payment_id: UUID
+
+
 @app.post("/api/v1/dev/payments/verify")
+@app.post("/api/v1/payment/verify")
 async def verify_payment_endpoint(
     request: VerifyPaymentRequest,
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
-    Verify a Razorpay payment signature.
-
-    Successful verification changes the payment state
-    from CREATED to SUCCESS.
-
-    Booking confirmation is handled separately.
+    Verify a Razorpay payment signature and finalize the booking.
     """
 
     try:
@@ -344,9 +349,15 @@ async def verify_payment_endpoint(
             provider=provider,
         )
 
+        finalization = finalize_booking(
+            current_user=current_user,
+            payment_id=request.payment_id,
+        )
+
         return {
             "success": True,
             **result,
+            "finalization": finalization,
         }
 
     except PaymentNotFoundError as error:
@@ -379,7 +390,42 @@ async def verify_payment_endpoint(
             "error": str(error),
         }
 
+    except BookingFinalizationError as error:
+        return {
+            "success": False,
+            "error": f"Payment verified but booking finalization failed: {error}",
+        }
+
     except PaymentError as error:
+        return {
+            "success": False,
+            "error": str(error),
+        }
+
+
+@app.post("/api/v1/dev/payments/finalize")
+@app.post("/api/v1/payment/finalize")
+async def finalize_payment_endpoint(
+    request: FinalizePaymentRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Finalize a booking after payment success.
+    Transitions booking status to CONFIRMED and converts hold.
+    """
+
+    try:
+        result = finalize_booking(
+            current_user=current_user,
+            payment_id=request.payment_id,
+        )
+
+        return {
+            "success": True,
+            **result,
+        }
+
+    except BookingFinalizationError as error:
         return {
             "success": False,
             "error": str(error),
@@ -529,6 +575,22 @@ def chat_with_agent(
     if result.get("__interrupt__"):
         response_payload["approval_required"] = True
 
+    booking_ctx = result.get("booking_context", {})
+    if booking_ctx.get("booking_id"):
+        response_payload["booking"] = {
+            "booking_id": booking_ctx.get("booking_id"),
+            "booking_reference": booking_ctx.get("booking_reference"),
+            "status": booking_ctx.get("booking_status"),
+            "total_amount": booking_ctx.get("total_amount"),
+        }
+    if booking_ctx.get("payment_order_id"):
+        response_payload["payment_order"] = {
+            "payment_id": booking_ctx.get("payment_id"),
+            "order_id": booking_ctx.get("payment_order_id"),
+            "amount": booking_ctx.get("payment_order_amount"),
+            "currency": booking_ctx.get("payment_currency"),
+        }
+
     return response_payload
 
 
@@ -589,6 +651,22 @@ def approve_agent_action(
 
     if result.get("__interrupt__"):
         response_payload["approval_required"] = True
+
+    booking_ctx = result.get("booking_context", {})
+    if booking_ctx.get("booking_id"):
+        response_payload["booking"] = {
+            "booking_id": booking_ctx.get("booking_id"),
+            "booking_reference": booking_ctx.get("booking_reference"),
+            "status": booking_ctx.get("booking_status"),
+            "total_amount": booking_ctx.get("total_amount"),
+        }
+    if booking_ctx.get("payment_order_id"):
+        response_payload["payment_order"] = {
+            "payment_id": booking_ctx.get("payment_id"),
+            "order_id": booking_ctx.get("payment_order_id"),
+            "amount": booking_ctx.get("payment_order_amount"),
+            "currency": booking_ctx.get("payment_currency"),
+        }
 
     return response_payload
 
