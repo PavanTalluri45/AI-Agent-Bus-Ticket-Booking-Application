@@ -9,9 +9,11 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg import connect
 from psycopg.rows import dict_row
+from sqlalchemy import text
 
 from main import app, get_current_user
 from bus_booking_ai_agent.auth.models import AuthenticatedUser
+from bus_booking_ai_agent.config.database import engine
 from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
     AgentState,
     BookingContext,
@@ -75,6 +77,18 @@ def _clean_db():
             conn.commit()
     except Exception as e:
         print(f"Warning: Cleanup failed: {e}")
+
+
+def _active_hold_count() -> int:
+    with engine.connect() as connection:
+        result = connection.execute(
+            text(
+                "SELECT COUNT(*) FROM seat_holds "
+                "WHERE auth_user_id = :user_id AND status = 'ACTIVE'"
+            ),
+            {"user_id": TEST_USER_ID},
+        )
+        return int(result.scalar_one())
 
 
 @pytest.fixture(autouse=True)
@@ -158,6 +172,154 @@ def test_seat_selection_does_not_hold_or_interrupt(base_booking_context):
 
     # Verify conversational response was returned
     assert result.get("final_response") != ""
+
+
+def test_punctuated_seat_selection_persists_and_followup_stages_hold(
+    base_booking_context,
+    monkeypatch,
+):
+    """Resolve seat 1A from availability, checkpoint it, then reuse it on a later hold request."""
+    thread_id = f"{TEST_USER_ID}:{uuid.uuid4()}"
+    config = {"configurable": {"thread_id": thread_id, "current_user": TEST_USER}}
+    init_state: AgentState = {
+        "user_id": str(TEST_USER_ID),
+        "user_message": "Search buses",
+        "memories": [],
+        "booking_context": base_booking_context,
+        "interaction_id": "",
+        "tool_name": "",
+        "tool_call_id": "",
+        "tool_arguments": {},
+        "tool_result": "",
+        "final_response": "",
+        "iteration": 0,
+        "error": "",
+        "pending_action": None,
+        "approval_status": "none",
+    }
+    graph.update_state(config, init_state)
+
+    def fake_interaction(state):
+        if state["user_message"] == "I want seat 1A.":
+            return SimpleNamespace(
+                id="selection-interaction",
+                steps=[
+                    SimpleNamespace(
+                        type="function_call",
+                        name="create_seat_hold",
+                        arguments={},
+                        id="unexpected-hold-call",
+                    )
+                ],
+            )
+
+        assert state["user_message"] == "Okay Go ahead"
+        assert state["booking_context"]["seat_id"] == ALT_SEAT_ID
+        assert state["booking_context"]["seat_number"] == ALT_SEAT_NUMBER
+        return SimpleNamespace(
+            id="hold-interaction",
+            steps=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="create_seat_hold",
+                    arguments={},
+                    id="hold-call",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(
+        integrated_agent,
+        "create_gemini_interaction",
+        fake_interaction,
+    )
+
+    selected_result = run_agent(
+        current_user=TEST_USER,
+        user_message="I want seat 1A.",
+        thread_id=thread_id,
+    )
+
+    assert selected_result.get("__interrupt__") is None
+    assert selected_result["booking_context"]["seat_id"] == ALT_SEAT_ID
+    assert selected_result["booking_context"]["seat_number"] == ALT_SEAT_NUMBER
+    assert selected_result.get("pending_action") is None
+    assert "no temporary hold was created" in selected_result["final_response"].lower()
+    assert _active_hold_count() == 0
+
+    checkpoint_state = graph.get_state(config).values
+    assert checkpoint_state["booking_context"]["seat_id"] == ALT_SEAT_ID
+    assert checkpoint_state["booking_context"]["seat_number"] == ALT_SEAT_NUMBER
+
+    hold_result = run_agent(
+        current_user=TEST_USER,
+        user_message="Okay Go ahead",
+        thread_id=thread_id,
+    )
+
+    assert "__interrupt__" in hold_result
+    assert hold_result["__interrupt__"][0].value["action"] == "create_seat_hold"
+    staged_state = graph.get_state(config).values
+    assert staged_state["approval_status"] == "pending"
+    staged_arguments = staged_state["pending_action"]["arguments"]
+    assert staged_arguments["schedule_id"] == SCHEDULE_ID
+    assert staged_arguments["seat_id"] == ALT_SEAT_ID
+    assert staged_arguments["boarding_stop_id"] == BOARDING_STOP_ID
+    assert staged_arguments["dropping_stop_id"] == DROPPING_STOP_ID
+    assert staged_state["booking_context"]["seat_number"] == ALT_SEAT_NUMBER
+    assert _active_hold_count() == 0
+
+
+@pytest.mark.parametrize(
+    "selection_message",
+    ["I want seat 1C.", "I want seat 1A instead of 1B."],
+)
+def test_unresolved_explicit_seat_selection_is_not_saved(
+    base_booking_context,
+    monkeypatch,
+    selection_message,
+):
+    """Unavailable or ambiguous requests must not retain a stale seat selection."""
+    thread_id = f"{TEST_USER_ID}:{uuid.uuid4()}"
+    context = base_booking_context.copy()
+    context["seat_id"] = SEAT_ID
+    context["seat_number"] = SEAT_NUMBER
+    config = {"configurable": {"thread_id": thread_id, "current_user": TEST_USER}}
+    init_state: AgentState = {
+        "user_id": str(TEST_USER_ID),
+        "user_message": "Search buses",
+        "memories": [],
+        "booking_context": context,
+        "interaction_id": "",
+        "tool_name": "",
+        "tool_call_id": "",
+        "tool_arguments": {},
+        "tool_result": "",
+        "final_response": "",
+        "iteration": 0,
+        "error": "",
+        "pending_action": None,
+        "approval_status": "none",
+    }
+    graph.update_state(config, init_state)
+    monkeypatch.setattr(
+        integrated_agent,
+        "create_gemini_interaction",
+        lambda state: pytest.fail("Gemini must not claim an unresolved seat was selected"),
+    )
+
+    result = run_agent(
+        current_user=TEST_USER,
+        user_message=selection_message,
+        thread_id=thread_id,
+    )
+
+    assert "couldn't resolve that seat" in result["final_response"].lower()
+    assert "not saved" in result["final_response"].lower()
+    assert result["booking_context"].get("seat_id") is None
+    assert result["booking_context"].get("seat_number") is None
+    assert "__interrupt__" not in result
+    assert _active_hold_count() == 0
 
 
 def test_availability_persistence_updates_authoritative_journey_context(base_booking_context):
@@ -348,7 +510,11 @@ def test_hold_context_does_not_require_available_seats(base_booking_context):
     assert pending_action["arguments"]["dropping_stop_id"] == DROPPING_STOP_ID
 
 
-def test_incomplete_context_hold_request_returns_advisory(base_booking_context):
+def test_incomplete_context_hold_request_returns_advisory(
+    base_booking_context,
+    monkeypatch,
+    capsys,
+):
     """
     Test 2: Explicit hold request when context is incomplete does NOT stage
     pending action or interrupt, and provides informative guidance.
@@ -357,6 +523,7 @@ def test_incomplete_context_hold_request_returns_advisory(base_booking_context):
     incomplete_context = base_booking_context.copy()
     incomplete_context.pop("seat_id", None)
     incomplete_context.pop("seat_number", None)
+    incomplete_context["available_seats"] = []
 
     config = {"configurable": {"thread_id": thread_id, "current_user": TEST_USER}}
     init_state: AgentState = {
@@ -377,6 +544,22 @@ def test_incomplete_context_hold_request_returns_advisory(base_booking_context):
     }
     graph.update_state(config, init_state)
 
+    monkeypatch.setattr(
+        integrated_agent,
+        "create_gemini_interaction",
+        lambda state: SimpleNamespace(
+            id="missing-seat-interaction",
+            steps=[
+                SimpleNamespace(
+                    type="function_call",
+                    name="create_seat_hold",
+                    arguments={},
+                    id="missing-seat-call",
+                )
+            ],
+        ),
+    )
+
     # User asks to hold seat without choosing one
     result = run_agent(
         current_user=TEST_USER,
@@ -389,7 +572,13 @@ def test_incomplete_context_hold_request_returns_advisory(base_booking_context):
     assert result.get("approval_status") in {"none", None}
     assert result.get("pending_action") is None
     # Must explain missing selection
-    assert "seat" in result.get("final_response", "").lower()
+    assert "seat_id" in result.get("final_response", "").lower()
+    log_output = capsys.readouterr().out
+    assert "schedule_id=True" in log_output
+    assert "seat_id=False" in log_output
+    assert "boarding_stop_id=True" in log_output
+    assert "dropping_stop_id=True" in log_output
+    assert _active_hold_count() == 0
 
 
 def test_explicit_hold_intent_triggers_hitl_interrupt(base_booking_context):
@@ -524,6 +713,8 @@ def test_approval_resumes_and_creates_real_db_hold(base_booking_context):
             assert row["status"] == "ACTIVE"
             assert row["expires_at"] > datetime.now(timezone.utc)
 
+    assert _active_hold_count() == 1
+
 
 def test_idempotent_approval_replay(base_booking_context):
     """
@@ -582,6 +773,7 @@ def test_idempotent_approval_replay(base_booking_context):
     assert hold_id_1 == hold_id_2
     assert result2["approval_status"] == "executed"
     assert "already held" in result2["final_response"].lower()
+    assert _active_hold_count() == 1
 
 
 def test_rejection_clears_pending_action_keeps_seat_zero_db_rows(base_booking_context):
@@ -636,6 +828,7 @@ def test_rejection_clears_pending_action_keeps_seat_zero_db_rows(base_booking_co
     assert result.get("approval_status") == "rejected"
     assert result.get("pending_action") is None
     assert "cancelled" in result.get("final_response", "").lower()
+    assert _active_hold_count() == 0
 
 
 def test_context_mismatch_prevents_stale_approval(base_booking_context):

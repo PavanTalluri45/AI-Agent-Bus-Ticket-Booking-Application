@@ -2,6 +2,7 @@ import asyncio
 import atexit
 import json
 import os
+import re
 import sys
 import time
 from datetime import date, datetime, timezone
@@ -1185,13 +1186,15 @@ def _resolve_selected_seat(
     if not available_seats:
         return context
 
-    message = _normalize_selection_text(user_message)
-    normalized_message = f" {message} "
+    message = user_message.casefold()
     matches: list[dict[str, Any]] = []
 
     for seat in available_seats:
-        seat_number = _normalize_selection_text(str(seat.get("seat_number", "")))
-        if seat_number and f" {seat_number} " in normalized_message:
+        seat_number = str(seat.get("seat_number", "")).strip()
+        if seat_number and re.search(
+            rf"(?<![a-z0-9]){re.escape(seat_number.casefold())}(?![a-z0-9])",
+            message,
+        ):
             matches.append(seat)
 
     if len(matches) != 1:
@@ -1208,6 +1211,64 @@ def _resolve_selected_seat(
     resolved["seat_number"] = str(seat_number)
     print(f"Application resolved seat selection: {seat_number} -> {seat_id}")
     return resolved
+
+
+def _is_explicit_seat_selection_request(user_message: str) -> bool:
+    """Identify a seat selection attempt that must resolve before Gemini responds."""
+    message = _normalize_selection_text(user_message)
+    return bool(
+        re.search(
+            r"\b(?:select\w*|choos\w*|chose|pick\w*|"
+            r"tak\w*|took|want\w*|lik\w*|prefer\w*)\b.*\bseat\b",
+            message,
+        )
+    )
+
+
+def _is_explicit_hold_request(user_message: str) -> bool:
+    message = _normalize_selection_text(user_message)
+    return bool(
+        re.search(r"\b(?:hold|reserve|lock)\b", message)
+        or message in {
+            "okay go ahead",
+            "ok go ahead",
+            "yes go ahead",
+            "sure go ahead",
+        }
+    )
+
+
+def _message_selects_resolved_seat(
+    user_message: str,
+    seat_number: str | None,
+    seat_id: str | None,
+    available_seats: list[dict[str, Any]],
+) -> bool:
+    if not seat_number or not seat_id:
+        return False
+    message = user_message.casefold()
+    matched_seats = [
+        seat
+        for seat in available_seats
+        if re.search(
+            rf"(?<![a-z0-9]){re.escape(str(seat.get('seat_number', '')).casefold())}(?![a-z0-9])",
+            message,
+        )
+    ]
+    if available_seats:
+        return (
+            len(matched_seats) == 1
+            and str(matched_seats[0].get("seat_number", "")).casefold()
+            == seat_number.casefold()
+            and str(matched_seats[0].get("seat_id") or "") == seat_id
+        )
+
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(seat_number.casefold())}(?![a-z0-9])",
+            message,
+        )
+    )
 
 
 def resolve_booking_context(
@@ -1477,6 +1538,37 @@ def llm_node(
             user_message=state["user_message"],
         )
 
+        if (
+            _is_explicit_seat_selection_request(state["user_message"])
+            and not _message_selects_resolved_seat(
+                state["user_message"],
+                resolved_context.get("seat_number"),
+                resolved_context.get("seat_id"),
+                resolved_context.get("available_seats", []),
+            )
+        ):
+            failed_context = resolved_context.copy()
+            failed_context.pop("seat_id", None)
+            failed_context.pop("seat_number", None)
+            message = (
+                "I couldn't resolve that seat from the current authoritative "
+                "seat-availability result, so the selection was not saved. "
+                "Please check availability and choose one of the listed seats."
+            )
+            print(f"[SEAT SELECTION ERROR] {message}")
+            return {
+                "booking_context": failed_context,
+                "tool_name": "",
+                "tool_call_id": "",
+                "tool_arguments": {},
+                "pending_action": None,
+                "approval_status": "none",
+                "tool_result": "",
+                "final_response": message,
+                "iteration": iteration,
+                "error": "",
+            }
+
         # Explicitly release active database hold if the journey or seat changed
         current_user: AuthenticatedUser | None = config.get("configurable", {}).get("current_user")
         if current_user:
@@ -1580,9 +1672,48 @@ def llm_node(
                 except Exception as val_err:
                     raise ToolGuardrailError(str(val_err)) from val_err
 
+                if not _is_explicit_hold_request(state["user_message"]):
+                    seat_number = resolved_context.get("seat_number", "")
+                    selected_seat = (
+                        f"Seat {seat_number} is selected. "
+                        if seat_number
+                        else "Your seat selection is unchanged. "
+                    )
+                    response_text = (
+                        f"{selected_seat}No temporary hold was created. "
+                        "Ask me to hold or reserve the seat when you're ready."
+                    )
+                    print(
+                        "[ACTION SIGNAL] Ignored create_seat_hold because the "
+                        "current message did not explicitly request a hold."
+                    )
+                    return {
+                        "interaction_id": interaction_id,
+                        "booking_context": resolved_context,
+                        "tool_name": "",
+                        "tool_call_id": "",
+                        "tool_arguments": {},
+                        "pending_action": None,
+                        "approval_status": "none",
+                        "tool_result": "",
+                        "final_response": response_text,
+                        "iteration": iteration,
+                        "error": "",
+                    }
+
                 hold_context = prepare_seat_hold_context(resolved_context)
-                print("[ACTION SIGNAL] Hold context:")
-                print(json.dumps(hold_context, indent=2, default=str))
+                print(
+                    "[ACTION SIGNAL] Hold context IDs present: "
+                    + ", ".join(
+                        f"{field}={bool(hold_context.get(field))}"
+                        for field in (
+                            "schedule_id",
+                            "seat_id",
+                            "boarding_stop_id",
+                            "dropping_stop_id",
+                        )
+                    )
+                )
 
                 # Verify context completeness using only the authoritative IDs
                 # required to create a hold. available_seats is not required here;
