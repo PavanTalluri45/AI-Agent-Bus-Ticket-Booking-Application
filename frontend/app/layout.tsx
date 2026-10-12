@@ -4,7 +4,7 @@ import "./globals.css";
 import { cn } from "@/lib/utils";
 import { ThemeProvider } from "@/components/theme-provider";
 import { AuthProvider } from "@/context/AuthContext";
-import { TooltipProvider } from "@/components/ui/tooltip"
+
 
 const googleSansFlex = Google_Sans_Flex({
   subsets: ["latin"],
@@ -30,9 +30,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           enableSystem
           disableTransitionOnChange
         >
-          <TooltipProvider>
+          
             <AuthProvider>{children}</AuthProvider>
-          </TooltipProvider>
+         
         </ThemeProvider>
       </body>
     </html>
