@@ -2,7 +2,10 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import text
+from bus_booking_ai_agent.config.database import engine
 
 from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
     run_agent,
@@ -87,6 +90,17 @@ from bus_booking_ai_agent.services.booking_finalization_models import (
 
 app = FastAPI(
     title="Bus Booking AI Agent",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -327,6 +341,60 @@ class FinalizePaymentRequest(BaseModel):
     payment_id: UUID
 
 
+GET_CONFIRMED_TICKET_SQL = """
+SELECT
+    b.booking_reference,
+    b.status,
+    b.total_amount,
+    bs.passenger_name,
+    bs.passenger_age,
+    bs.passenger_gender,
+    seat.seat_number,
+    op.name AS operator_name,
+    bus.bus_number,
+    bus.bus_type,
+    r.origin,
+    r.destination,
+    s.travel_date,
+    b_stop.stop_name AS boarding_point,
+    d_stop.stop_name AS dropping_point
+FROM bookings b
+LEFT JOIN booking_seats bs ON bs.booking_id = b.id
+LEFT JOIN bus_seats seat ON seat.id = bs.seat_id
+LEFT JOIN schedules s ON s.id = b.schedule_id
+LEFT JOIN buses bus ON bus.id = s.bus_id
+LEFT JOIN operators op ON op.id = bus.operator_id
+LEFT JOIN routes r ON r.id = s.route_id
+LEFT JOIN route_stops b_stop ON b_stop.id = b.boarding_stop_id
+LEFT JOIN route_stops d_stop ON d_stop.id = b.dropping_stop_id
+WHERE b.id = :booking_id
+LIMIT 1;
+"""
+
+
+def _get_confirmed_ticket_details(booking_id: UUID) -> dict | None:
+    try:
+        with engine.connect() as connection:
+            row = (
+                connection.execute(
+                    text(GET_CONFIRMED_TICKET_SQL),
+                    {"booking_id": booking_id},
+                )
+                .mappings()
+                .first()
+            )
+            if not row:
+                return None
+            data = dict(row)
+            if data.get("total_amount") is not None:
+                data["total_amount"] = str(data["total_amount"])
+            if data.get("travel_date") is not None:
+                data["travel_date"] = str(data["travel_date"])
+            return data
+    except Exception:
+        return None
+
+
 @app.post("/api/v1/dev/payments/verify")
 @app.post("/api/v1/payment/verify")
 async def verify_payment_endpoint(
@@ -354,11 +422,18 @@ async def verify_payment_endpoint(
             payment_id=request.payment_id,
         )
 
-        return {
+        booking_id = finalization["booking"]["id"]
+        ticket = _get_confirmed_ticket_details(booking_id)
+
+        response_payload = {
             "success": True,
             **result,
             "finalization": finalization,
         }
+        if ticket:
+            response_payload["ticket"] = ticket
+
+        return response_payload
 
     except PaymentNotFoundError as error:
         return {
@@ -420,10 +495,17 @@ async def finalize_payment_endpoint(
             payment_id=request.payment_id,
         )
 
-        return {
+        booking_id = result["booking"]["id"]
+        ticket = _get_confirmed_ticket_details(booking_id)
+
+        response_payload = {
             "success": True,
             **result,
         }
+        if ticket:
+            response_payload["ticket"] = ticket
+
+        return response_payload
 
     except BookingFinalizationError as error:
         return {
