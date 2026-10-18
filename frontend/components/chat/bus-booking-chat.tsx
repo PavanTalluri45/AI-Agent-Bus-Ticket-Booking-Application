@@ -2,21 +2,35 @@
 
 import React, { useState, useRef, useEffect } from "react";
 import { useAuth } from "@/context/AuthContext";
-import { sendChatMessage, sendApprovalDecision, verifyPayment } from "@/lib/api/bus-agent";
+import {
+  sendChatMessage,
+  sendApprovalDecision,
+  verifyPayment,
+} from "@/lib/api/bus-agent";
 import { openRazorpayCheckout } from "@/lib/razorpay";
 import { ApprovalCard } from "./approval-card";
 import { PaymentCard } from "./payment-card";
 import { ConfirmedTicket } from "./confirmed-ticket";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
-  Send,
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupTextarea,
+} from "@/components/ui/input-group";
+import {
+  ArrowUp,
   Loader2,
   Bot,
   User,
   AlertCircle,
   Sparkles,
-  Ticket,
 } from "lucide-react";
 import type {
   ChatMessage,
@@ -29,15 +43,7 @@ export function BusBookingChat() {
   const { user } = useAuth();
 
   // Chat State
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: "initial-welcome",
-      role: "assistant",
-      content:
-        "Hello! I am your AI Bus Booking Assistant. Where would you like to travel? For example, ask: \"Find buses from Hyderabad to Bangalore on 2026-10-10\"",
-      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-    },
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -47,16 +53,22 @@ export function BusBookingChat() {
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
 
   // Payment State
-  const [activeBooking, setActiveBooking] = useState<BookingSummary | null>(null);
-  const [paymentOrder, setPaymentOrder] = useState<PaymentOrderSummary | null>(null);
+  const [activeBooking, setActiveBooking] = useState<BookingSummary | null>(
+    null,
+  );
+  const [paymentOrder, setPaymentOrder] = useState<PaymentOrderSummary | null>(
+    null,
+  );
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
 
   // Confirmed Ticket State
-  const [confirmedTicket, setConfirmedTicket] = useState<ConfirmedTicketData | null>(null);
+  const [confirmedTicket, setConfirmedTicket] =
+    useState<ConfirmedTicketData | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -64,12 +76,19 @@ export function BusBookingChat() {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages, approvalRequired, paymentOrder, confirmedTicket, isLoading, isVerifying]);
+  }, [
+    messages,
+    approvalRequired,
+    paymentOrder,
+    confirmedTicket,
+    isLoading,
+    isVerifying,
+  ]);
 
   // Handle automatic checkout opening when a new payment_order arrives
   const triggerRazorpayCheckout = async (
     order: PaymentOrderSummary,
-    booking?: BookingSummary
+    booking?: BookingSummary,
   ) => {
     if (isPaymentOpen || isVerifying) return;
 
@@ -104,7 +123,8 @@ export function BusBookingChat() {
         setConfirmedTicket(verificationResult.ticket);
       } else if (verificationResult.finalization?.booking) {
         setConfirmedTicket({
-          booking_reference: verificationResult.finalization.booking.booking_reference,
+          booking_reference:
+            verificationResult.finalization.booking.booking_reference,
           status: verificationResult.finalization.booking.status,
           total_amount: verificationResult.finalization.booking.total_amount,
         });
@@ -148,7 +168,9 @@ export function BusBookingChat() {
           },
         ]);
       } else {
-        setErrorMessage(error?.message || "Payment process encountered an error.");
+        setErrorMessage(
+          error?.message || "Payment process encountered an error.",
+        );
       }
     }
   };
@@ -157,7 +179,13 @@ export function BusBookingChat() {
   const handleSendMessage = async (e?: React.FormEvent) => {
     e?.preventDefault();
     const text = inputValue.trim();
-    if (!text || isLoading || approvalRequired || isPaymentOpen || isVerifying) {
+    if (
+      !text ||
+      isLoading ||
+      approvalRequired ||
+      isPaymentOpen ||
+      isVerifying
+    ) {
       return;
     }
 
@@ -168,7 +196,10 @@ export function BusBookingChat() {
       id: `user-${Date.now()}`,
       role: "user",
       content: text,
-      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      timestamp: new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
     };
 
     setMessages((prev) => [...prev, userMessage]);
@@ -181,7 +212,10 @@ export function BusBookingChat() {
         id: `assistant-${Date.now()}`,
         role: "assistant",
         content: data.response || "I am processing your request.",
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        timestamp: new Date().toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
         approvalRequired: data.approval_required,
         booking: data.booking,
         paymentOrder: data.payment_order,
@@ -208,7 +242,9 @@ export function BusBookingChat() {
       }
     } catch (err: unknown) {
       const error = err as Error;
-      setErrorMessage(error?.message || "Failed to communicate with the bus agent.");
+      setErrorMessage(
+        error?.message || "Failed to communicate with the bus agent.",
+      );
     } finally {
       setIsLoading(false);
     }
@@ -229,7 +265,10 @@ export function BusBookingChat() {
         id: `assistant-${Date.now()}`,
         role: "assistant",
         content: data.response || "Action approved.",
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        timestamp: new Date().toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
         booking: data.booking,
         paymentOrder: data.payment_order,
       };
@@ -268,7 +307,10 @@ export function BusBookingChat() {
         id: `assistant-${Date.now()}`,
         role: "assistant",
         content: data.response || "Action rejected.",
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        timestamp: new Date().toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
@@ -291,8 +333,12 @@ export function BusBookingChat() {
       {
         id: `new-search-${Date.now()}`,
         role: "assistant",
-        content: "Where would you like to travel next? Please enter your origin, destination, and travel date.",
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        content:
+          "Where would you like to travel next? Please enter your origin, destination, and travel date.",
+        timestamp: new Date().toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
       },
     ]);
   };
@@ -300,179 +346,190 @@ export function BusBookingChat() {
   const isInputDisabled =
     isLoading || approvalRequired || isPaymentOpen || isVerifying;
 
+
+
   return (
-    <div className="flex flex-col h-[calc(100vh-8.5rem)] max-w-4xl mx-auto w-full bg-background border rounded-xl shadow-sm overflow-hidden">
-      {/* Chat Header */}
-      <div className="flex items-center justify-between px-5 py-3.5 border-b bg-card">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center font-bold shadow-sm">
-            <Bot className="w-5 h-5" />
-          </div>
-          <div>
-            <h2 className="text-sm font-semibold text-foreground flex items-center gap-2">
-              Bus Booking AI Agent
-              <span className="flex h-2 w-2 rounded-full bg-emerald-500" />
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              Conversational search, live seat selection, & secure booking
-            </p>
-          </div>
-        </div>
-        {activeBooking && !confirmedTicket && (
-          <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-muted text-xs font-medium">
-            <Ticket className="w-3.5 h-3.5 text-muted-foreground" />
-            <span>Ref: {activeBooking.booking_reference}</span>
-          </div>
-        )}
-      </div>
-
-      {/* Messages Scroll Area */}
-      <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
-        {messages.map((msg) => {
-          const isUser = msg.role === "user";
-          return (
-            <div
-              key={msg.id}
-              className={`flex items-start gap-2.5 sm:gap-3 ${
-                isUser ? "flex-row-reverse" : "flex-row"
-              }`}
-            >
+    <div className="flex flex-col h-[calc(100vh-8.5rem)] max-w-4xl mx-auto w-full">
+      {/* Empty (initial) state */}
+      {messages.length === 0 ? (
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>Where would you like to travel?</EmptyTitle>
+            <EmptyDescription>
+              Tell the agent your route and date. It will search buses, help you
+              pick a seat and take you through secure payment.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : (
+        <div className="flex-1 overflow-y-auto py-4 space-y-4">
+          {messages.map((msg) => {
+            const isUser = msg.role === "user";
+            return (
               <div
-                className={`w-7 h-7 sm:w-8 sm:h-8 rounded-full flex items-center justify-center flex-shrink-0 text-xs font-medium ${
-                  isUser
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-muted text-muted-foreground border"
-                }`}
-              >
-                {isUser ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
-              </div>
-
-              <div
-                className={`flex flex-col max-w-[85%] sm:max-w-[78%] ${
-                  isUser ? "items-end" : "items-start"
+                key={msg.id}
+                className={`flex items-start gap-2.5 sm:gap-3 ${
+                  isUser ? "flex-row-reverse" : "flex-row"
                 }`}
               >
                 <div
-                  className={`rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap leading-relaxed shadow-sm ${
+                  className={`w-7 h-7 sm:w-8 sm:h-8 rounded-full flex items-center justify-center shrink-0 text-xs font-medium ${
                     isUser
-                      ? "bg-primary text-primary-foreground rounded-tr-xs"
-                      : "bg-muted/70 dark:bg-muted/40 text-foreground border rounded-tl-xs"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground border"
                   }`}
                 >
-                  {msg.content}
+                  {isUser ? (
+                    <User className="w-4 h-4" />
+                  ) : (
+                    <Bot className="w-4 h-4" />
+                  )}
                 </div>
-                <span className="text-[10px] text-muted-foreground mt-1 px-1">
-                  {msg.timestamp}
-                </span>
+
+                <div
+                  className={`flex flex-col max-w-[85%] sm:max-w-[78%] ${
+                    isUser ? "items-end" : "items-start"
+                  }`}
+                >
+                  <div
+                    className={`rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap leading-relaxed shadow-sm ${
+                      isUser
+                        ? "bg-primary text-primary-foreground rounded-tr-xs"
+                        : "bg-muted/70 dark:bg-muted/40 text-foreground border rounded-tl-xs"
+                    }`}
+                  >
+                    {msg.content}
+                  </div>
+                  {msg.timestamp && (
+                    <span className="text-[10px] text-muted-foreground mt-1 px-1">
+                      {msg.timestamp}
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* HITL Approval Barrier Card */}
+          {approvalRequired && pendingPrompt && (
+            <div className="pl-9 sm:pl-11 pr-2">
+              <ApprovalCard
+                prompt={pendingPrompt}
+                onApprove={handleApprove}
+                onReject={handleReject}
+                disabled={isLoading}
+              />
+            </div>
+          )}
+
+          {/* Active Payment Order Card */}
+          {paymentOrder && !confirmedTicket && (
+            <div className="pl-9 sm:pl-11 pr-2">
+              <PaymentCard
+                paymentOrder={paymentOrder}
+                booking={activeBooking || undefined}
+                isPaymentOpen={isPaymentOpen}
+                isVerifying={isVerifying}
+                onOpenCheckout={() =>
+                  triggerRazorpayCheckout(
+                    paymentOrder,
+                    activeBooking || undefined,
+                  )
+                }
+                disabled={isLoading || isVerifying}
+              />
+            </div>
+          )}
+
+          {/* Confirmed Ticket Card */}
+          {confirmedTicket && (
+            <div className="pl-9 sm:pl-11 pr-2">
+              <ConfirmedTicket
+                ticket={confirmedTicket}
+                onBookAnother={handleBookAnother}
+              />
+            </div>
+          )}
+
+          {/* Assistant Typing Indicator */}
+          {isLoading && (
+            <div className="flex items-center gap-2.5 text-xs text-muted-foreground pl-1">
+              <div className="w-7 h-7 rounded-full bg-muted border flex items-center justify-center">
+                <Bot className="w-4 h-4 animate-pulse text-muted-foreground" />
+              </div>
+              <div className="flex items-center gap-1.5 bg-muted/50 border px-3 py-1.5 rounded-full">
+                <Sparkles className="w-3.5 h-3.5 text-emerald-600 animate-spin" />
+                <span>Agent is thinking</span>
               </div>
             </div>
-          );
-        })}
+          )}
 
-        {/* HITL Approval Barrier Card */}
-        {approvalRequired && pendingPrompt && (
-          <div className="pl-9 sm:pl-11 pr-2">
-            <ApprovalCard
-              prompt={pendingPrompt}
-              onApprove={handleApprove}
-              onReject={handleReject}
-              disabled={isLoading}
-            />
-          </div>
-        )}
-
-        {/* Active Payment Order Card */}
-        {paymentOrder && !confirmedTicket && (
-          <div className="pl-9 sm:pl-11 pr-2">
-            <PaymentCard
-              paymentOrder={paymentOrder}
-              booking={activeBooking || undefined}
-              isPaymentOpen={isPaymentOpen}
-              isVerifying={isVerifying}
-              onOpenCheckout={() => triggerRazorpayCheckout(paymentOrder, activeBooking || undefined)}
-              disabled={isLoading || isVerifying}
-            />
-          </div>
-        )}
-
-        {/* Confirmed Ticket Card */}
-        {confirmedTicket && (
-          <div className="pl-9 sm:pl-11 pr-2">
-            <ConfirmedTicket
-              ticket={confirmedTicket}
-              onBookAnother={handleBookAnother}
-            />
-          </div>
-        )}
-
-        {/* Assistant Typing Indicator */}
-        {isLoading && (
-          <div className="flex items-center gap-2.5 text-xs text-muted-foreground pl-1">
-            <div className="w-7 h-7 rounded-full bg-muted border flex items-center justify-center">
-              <Bot className="w-4 h-4 animate-pulse text-muted-foreground" />
+          {/* Error Alert Banner */}
+          {errorMessage && (
+            <div className="flex items-center gap-2 p-3 bg-destructive/10 border border-destructive/20 text-destructive rounded-lg text-xs">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span className="flex-1">{errorMessage}</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                onClick={() => setErrorMessage(null)}
+                className="text-xs h-6 px-1.5"
+              >
+                Dismiss
+              </Button>
             </div>
-            <div className="flex items-center gap-1.5 bg-muted/50 border px-3 py-1.5 rounded-full">
-              <Sparkles className="w-3.5 h-3.5 text-emerald-600 animate-spin" />
-              <span>Agent is thinking...</span>
-            </div>
-          </div>
-        )}
+          )}
 
-        {/* Error Alert Banner */}
-        {errorMessage && (
-          <div className="flex items-center gap-2 p-3 bg-destructive/10 border border-destructive/20 text-destructive rounded-lg text-xs">
-            <AlertCircle className="w-4 h-4 flex-shrink-0" />
-            <span className="flex-1">{errorMessage}</span>
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              onClick={() => setErrorMessage(null)}
-              className="text-xs h-6 px-1.5"
-            >
-              Dismiss
-            </Button>
-          </div>
-        )}
-
-        <div ref={messagesEndRef} />
-      </div>
+          <div ref={messagesEndRef} />
+        </div>
+      )}
 
       {/* Input Form Bar */}
-      <div className="p-3 sm:p-4 border-t bg-card">
-        <form onSubmit={handleSendMessage} className="flex items-center gap-2">
-          <Input
-            ref={inputRef}
-            type="text"
-            placeholder={
-              approvalRequired
-                ? "Please approve or reject above before continuing..."
-                : isVerifying
-                ? "Verifying payment with server..."
-                : isPaymentOpen
-                ? "Complete payment in Razorpay modal..."
-                : "Type your message (e.g. 'I want seat 1B', 'Search buses to Chennai')..."
-            }
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            disabled={isInputDisabled}
-            className="flex-1 text-sm bg-background"
-          />
-          <Button
-            type="submit"
-            disabled={isInputDisabled || !inputValue.trim()}
-            className="bg-emerald-600 hover:bg-emerald-700 text-white shrink-0"
-          >
-            {isLoading ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Send className="w-4 h-4" />
-            )}
-            <span className="sr-only">Send Message</span>
-          </Button>
+      <div className="pt-3 sm:pt-4">
+        <form ref={formRef} onSubmit={handleSendMessage}>
+          <InputGroup>
+            <InputGroupTextarea
+              ref={inputRef}
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              placeholder={
+                approvalRequired
+                  ? "Please approve or reject above before continuing..."
+                  : isVerifying
+                    ? "Verifying payment with server..."
+                    : isPaymentOpen
+                      ? "Complete payment in Razorpay modal..."
+                      : "Type your message (e.g. 'I want seat 1B', 'Search buses to Chennai')..."
+              }
+              disabled={isInputDisabled}
+              onKeyDown={(e) => {
+                if (
+                  e.key === "Enter" &&
+                  !e.shiftKey &&
+                  !e.nativeEvent.isComposing
+                ) {
+                  e.preventDefault();
+                  formRef.current?.requestSubmit();
+                }
+              }}
+              className="p-3 text-sm"
+            />
+            <InputGroupAddon align="block-end">
+              <InputGroupButton
+                type="submit"
+                size="icon-sm"
+                variant="default"
+                className="ml-auto rounded-full"
+                disabled={isInputDisabled || !inputValue.trim()}
+                aria-label="Send message"
+              >
+                {isLoading ? <Loader2 className="animate-spin" /> : <ArrowUp />}
+              </InputGroupButton>
+            </InputGroupAddon>
+          </InputGroup>
         </form>
       </div>
     </div>
   );
 }
-

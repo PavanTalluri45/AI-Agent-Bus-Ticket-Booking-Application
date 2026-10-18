@@ -43,7 +43,7 @@ export default function Page() {
           </div>
         </header>
 
-        <main className="flex-1 p-3 sm:p-5 flex flex-col justify-center">
+        <main className="flex-1 p-3 sm:p-5">
           <BusBookingChat />
         </main>
       </SidebarInset>
