@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect } from "react";
+import Image from "next/image";
 import { useAuth } from "@/context/AuthContext";
 import {
   sendChatMessage,
@@ -11,9 +12,11 @@ import { openRazorpayCheckout } from "@/lib/razorpay";
 import { ApprovalCard } from "./approval-card";
 import { PaymentCard } from "./payment-card";
 import { ConfirmedTicket } from "./confirmed-ticket";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
+  EmptyContent,
   EmptyDescription,
   EmptyHeader,
   EmptyTitle,
@@ -27,8 +30,6 @@ import {
 import {
   ArrowUp,
   Loader2,
-  Bot,
-  User,
   AlertCircle,
   Sparkles,
 } from "lucide-react";
@@ -348,21 +349,63 @@ export function BusBookingChat() {
 
 
 
+  const displayName =
+    user?.user_metadata?.full_name ||
+    user?.user_metadata?.name ||
+    user?.email?.split("@")[0] ||
+    "there";
+
+  const handleSuggestion = (from: string, to: string) => {
+    // Today's date as local YYYY-MM-DD (computed on click, so no SSR mismatch)
+    const today = new Date().toLocaleDateString("en-CA");
+    setInputValue(`Find buses from ${from} to ${to} on ${today}`);
+    inputRef.current?.focus();
+  };
+
+  const userAvatar =
+    user?.user_metadata?.avatar_url || user?.user_metadata?.picture || "";
+  const userInitial = (user ? displayName : "U").charAt(0).toUpperCase();
+
   return (
-    <div className="flex flex-col h-[calc(100vh-8.5rem)] max-w-4xl mx-auto w-full">
+    <div className="flex flex-col h-[calc(100vh-7.5rem)] max-w-4xl mx-auto w-full">
       {/* Empty (initial) state */}
       {messages.length === 0 ? (
         <Empty>
           <EmptyHeader>
-            <EmptyTitle>Where would you like to travel?</EmptyTitle>
+            <EmptyTitle className="text-[36px] leading-[40px] bg-gradient-to-r from-[rgb(81,175,230)] via-[rgb(53,95,242)] to-[rgb(17,40,122)] bg-clip-text text-transparent">Hi, {displayName}</EmptyTitle>
             <EmptyDescription>
               Tell the agent your route and date. It will search buses, help you
               pick a seat and take you through secure payment.
             </EmptyDescription>
           </EmptyHeader>
+          <EmptyContent className="max-w-xl">
+            <div className="mx-auto flex w-fit max-w-full flex-col gap-3">
+              <p className="text-sm font-medium text-muted-foreground">
+                You may try asking
+              </p>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {[
+                  { from: "Hyderabad", to: "Bangalore" },
+                  { from: "Hyderabad", to: "Vijayawada" },
+                  { from: "Bangalore", to: "Chennai" },
+                ].map((route) => (
+                  <Button
+                    key={`${route.from}-${route.to}`}
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="sm:last:odd:col-span-2 sm:last:odd:justify-self-center"
+                    onClick={() => handleSuggestion(route.from, route.to)}
+                  >
+                    Buses From {route.from} to {route.to}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          </EmptyContent>
         </Empty>
       ) : (
-        <div className="flex-1 overflow-y-auto py-4 space-y-4">
+        <div className="flex-1 overflow-y-auto py-4 space-y-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {messages.map((msg) => {
             const isUser = msg.role === "user";
             return (
@@ -372,19 +415,26 @@ export function BusBookingChat() {
                   isUser ? "flex-row-reverse" : "flex-row"
                 }`}
               >
-                <div
-                  className={`w-7 h-7 sm:w-8 sm:h-8 rounded-full flex items-center justify-center shrink-0 text-xs font-medium ${
-                    isUser
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted text-muted-foreground border"
-                  }`}
-                >
-                  {isUser ? (
-                    <User className="w-4 h-4" />
-                  ) : (
-                    <Bot className="w-4 h-4" />
-                  )}
-                </div>
+                {isUser ? (
+                  <Avatar className="mt-1 size-7 shrink-0 sm:size-8">
+                    <AvatarImage
+                      src={userAvatar}
+                      alt={displayName}
+                      referrerPolicy="no-referrer"
+                    />
+                    <AvatarFallback className="text-xs">
+                      {userInitial}
+                    </AvatarFallback>
+                  </Avatar>
+                ) : (
+                  <Image
+                    src="/ai-agent.webp"
+                    alt="AI agent"
+                    width={32}
+                    height={32}
+                    className="size-7 shrink-0 rounded-full sm:size-8"
+                  />
+                )}
 
                 <div
                   className={`flex flex-col max-w-[85%] sm:max-w-[78%] ${
@@ -392,10 +442,10 @@ export function BusBookingChat() {
                   }`}
                 >
                   <div
-                    className={`rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap leading-relaxed shadow-sm ${
+                    className={`text-sm whitespace-pre-wrap leading-relaxed ${
                       isUser
-                        ? "bg-primary text-primary-foreground rounded-tr-xs"
-                        : "bg-muted/70 dark:bg-muted/40 text-foreground border rounded-tl-xs"
+                        ? "rounded-[22px] bg-primary px-4 py-2.5 text-primary-foreground shadow-sm"
+                        : "py-1.5 text-foreground"
                     }`}
                   >
                     {msg.content}
@@ -454,9 +504,13 @@ export function BusBookingChat() {
           {/* Assistant Typing Indicator */}
           {isLoading && (
             <div className="flex items-center gap-2.5 text-xs text-muted-foreground pl-1">
-              <div className="w-7 h-7 rounded-full bg-muted border flex items-center justify-center">
-                <Bot className="w-4 h-4 animate-pulse text-muted-foreground" />
-              </div>
+              <Image
+                src="/ai-agent.webp"
+                alt="AI agent"
+                width={28}
+                height={28}
+                className="size-7 shrink-0 animate-pulse rounded-full"
+              />
               <div className="flex items-center gap-1.5 bg-muted/50 border px-3 py-1.5 rounded-full">
                 <Sparkles className="w-3.5 h-3.5 text-emerald-600 animate-spin" />
                 <span>Agent is thinking</span>
@@ -486,7 +540,7 @@ export function BusBookingChat() {
       )}
 
       {/* Input Form Bar */}
-      <div className="pt-3 sm:pt-4">
+      <div className="pt-2 sm:pt-3">
         <form ref={formRef} onSubmit={handleSendMessage}>
           <InputGroup>
             <InputGroupTextarea
@@ -513,14 +567,15 @@ export function BusBookingChat() {
                   formRef.current?.requestSubmit();
                 }
               }}
-              className="p-3 text-sm"
+              rows={1}
+              className="max-h-32 min-h-0 px-3 py-2.5 text-sm"
             />
-            <InputGroupAddon align="block-end">
+            <InputGroupAddon align="inline-end">
               <InputGroupButton
                 type="submit"
                 size="icon-sm"
                 variant="default"
-                className="ml-auto rounded-full"
+                className="rounded-full"
                 disabled={isInputDisabled || !inputValue.trim()}
                 aria-label="Send message"
               >
