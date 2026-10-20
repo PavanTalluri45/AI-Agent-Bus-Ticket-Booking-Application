@@ -1,13 +1,18 @@
+import json
+from datetime import datetime, timezone
 from typing import Literal
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from bus_booking_ai_agent.config.database import engine
+from bus_booking_ai_agent.config.gemini import client as gemini_client, MODEL as GEMINI_MODEL
 
 from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
+    checkpointer,
+    graph,
     run_agent,
 )
 
@@ -515,20 +520,28 @@ async def finalize_payment_endpoint(
 
 
 # ============================================================
-# Agent Chat
+# Agent Chat & Conversation Management
 # ============================================================
 
 
 class AgentChatRequest(BaseModel):
-    """Request body for a normal agent conversation message."""
+    """Request body for an agent conversation message."""
 
     message: str = Field(min_length=1)
+    conversation_id: str | None = None
 
 
 class AgentApprovalRequest(BaseModel):
     """Request body for resuming a pending human approval."""
 
     approval_decision: Literal["approve", "reject"]
+    conversation_id: str | None = None
+
+
+class RenameConversationRequest(BaseModel):
+    """Request body for renaming a conversation."""
+
+    title: str = Field(min_length=1, max_length=100)
 
 
 class UpdateMemoryRequest(BaseModel):
@@ -550,45 +563,13 @@ class DeleteMemoryRequest(BaseModel):
     memory_key: str = Field(min_length=1)
 
 
-def _get_conversation_context(
-    request: Request,
-    response: Response,
-    current_user: AuthenticatedUser,
-) -> tuple[str, str]:
-    """
-    Get or create the browser conversation ID and build its LangGraph thread ID.
-
-    The conversation ID is stored in an HttpOnly cookie. The authenticated
-    Supabase user ID is always included in the LangGraph thread ID so one user
-    cannot address another user's conversation thread.
-    """
-
-    conversation_id = request.cookies.get("bus_booking_conversation_id")
-
-    if not conversation_id:
-        conversation_id = str(uuid4())
-
-        response.set_cookie(
-            key="bus_booking_conversation_id",
-            value=conversation_id,
-            httponly=True,
-            secure=False,
-            samesite="lax",
-            max_age=60 * 60 * 24 * 30,
-        )
-
-    thread_id = f"{current_user.id}:{conversation_id}"
-
-    return conversation_id, thread_id
-
-
 def _check_agent_rate_limit(current_user: AuthenticatedUser) -> None:
     """Apply the agent chat rate limit to both normal and approval requests."""
 
     rate_limit = check_rate_limit(
         user_id=str(current_user.id),
         action="agent_chat",
-        limit=10,
+        limit=20,
         window_seconds=60,
     )
 
@@ -604,6 +585,138 @@ def _check_agent_rate_limit(current_user: AuthenticatedUser) -> None:
         )
 
 
+def _generate_and_update_title(
+    conversation_id: str,
+    fallback_title: str,
+    user_message: str,
+) -> None:
+    """
+    Generate a 3-5 word concise title using Gemini and update the conversation
+    ONLY IF the title has not been modified by the user in the meantime.
+    """
+    try:
+        prompt = (
+            "Generate a very short, concise title (maximum 4-5 words, no quotation marks) "
+            "summarizing this bus ticket travel query:\n\n"
+            f"{user_message}"
+        )
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+        )
+        new_title = response.text.strip().replace('"', '').replace("'", "")
+        if new_title and len(new_title) <= 80:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("""
+                        UPDATE conversations 
+                        SET title = :title 
+                        WHERE id = :id AND title = :fallback_title
+                    """),
+                    {
+                        "id": conversation_id,
+                        "title": new_title,
+                        "fallback_title": fallback_title,
+                    },
+                )
+    except Exception as exc:
+        print(f"[TITLE GENERATION] Warning generating title: {exc}")
+
+
+def _get_or_create_conversation(
+    current_user: AuthenticatedUser,
+    conversation_id: str | None,
+    first_message: str,
+) -> tuple[str, str, bool]:
+    """
+    Verify conversation ownership if ID is provided, or create a new conversation
+    with a fallback title derived from the first user message.
+
+    Returns:
+        (conversation_id, thread_id, is_new)
+    """
+    if conversation_id:
+        try:
+            conv_uuid = UUID(conversation_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid conversation ID format.",
+            )
+
+        thread_id = f"{current_user.id}:{conversation_id}"
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("""
+                    SELECT id FROM conversations 
+                    WHERE id = :id AND auth_user_id = :user_id
+                """),
+                {"id": str(conv_uuid), "user_id": str(current_user.id)},
+            ).mappings().first()
+
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail="Conversation not found or access denied.",
+            )
+
+        thread_id = f"{current_user.id}:{conversation_id}"
+        return conversation_id, thread_id, False
+
+    # New conversation creation
+    fallback_title = first_message[:60].strip() or "New Booking Chat"
+    with engine.begin() as conn:
+        new_row = conn.execute(
+            text("""
+                INSERT INTO conversations (auth_user_id, title)
+                VALUES (:user_id, :title)
+                RETURNING id
+            """),
+            {"user_id": str(current_user.id), "title": fallback_title},
+        ).mappings().first()
+
+    new_conv_id = str(new_row["id"])
+    thread_id = f"{current_user.id}:{new_conv_id}"
+    return new_conv_id, thread_id, True
+
+
+def _save_chat_messages(
+    conversation_id: str,
+    user_message: str,
+    assistant_message: str,
+    metadata: dict | None = None,
+) -> None:
+    """Persist both user and assistant turns to chat_messages and touch conversations.updated_at."""
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO chat_messages (conversation_id, role, content, metadata)
+                VALUES (:conv_id, 'user', :content, NULL)
+            """),
+            {"conv_id": conversation_id, "content": user_message},
+        )
+        conn.execute(
+            text("""
+                INSERT INTO chat_messages (conversation_id, role, content, metadata)
+                VALUES (:conv_id, 'assistant', :content, :metadata)
+            """),
+            {
+                "conv_id": conversation_id,
+                "content": assistant_message,
+                "metadata": json.dumps(metadata) if metadata else None,
+            },
+        )
+        conn.execute(
+            text("""
+                UPDATE conversations 
+                SET updated_at = NOW() 
+                WHERE id = :conv_id
+            """),
+            {"conv_id": conversation_id},
+        )
+
+
 # ============================================================
 # Agent Chat: Normal Message
 # ============================================================
@@ -611,30 +724,32 @@ def _check_agent_rate_limit(current_user: AuthenticatedUser) -> None:
 
 @app.post("/api/v1/chat")
 def chat_with_agent(
-    request: Request,
-    response: Response,
     chat_request: AgentChatRequest,
+    background_tasks: BackgroundTasks,
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
     Send a normal user message to the bus-booking AI agent.
 
-    This endpoint is intentionally responsible only for normal conversation
-    messages. Human approval is handled by /api/v1/chat/approval.
+    Creates the conversation on the first message if conversation_id is omitted,
+    persists messages, and runs title generation in the background.
     """
-
     _check_agent_rate_limit(current_user)
 
-    conversation_id, thread_id = _get_conversation_context(
-        request=request,
-        response=response,
+    user_text = chat_request.message.strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    conversation_id, thread_id, is_new = _get_or_create_conversation(
         current_user=current_user,
+        conversation_id=chat_request.conversation_id,
+        first_message=user_text,
     )
 
     try:
         result = run_agent(
             current_user=current_user,
-            user_message=chat_request.message.strip(),
+            user_message=user_text,
             thread_id=thread_id,
         )
     except PermissionError as exc:
@@ -654,24 +769,52 @@ def chat_with_agent(
         "response": result["final_response"],
     }
 
+    msg_metadata: dict = {}
     if result.get("__interrupt__"):
         response_payload["approval_required"] = True
+        msg_metadata["approval_required"] = True
 
     booking_ctx = result.get("booking_context", {})
     if booking_ctx.get("booking_id"):
-        response_payload["booking"] = {
+        booking_data = {
             "booking_id": booking_ctx.get("booking_id"),
             "booking_reference": booking_ctx.get("booking_reference"),
             "status": booking_ctx.get("booking_status"),
             "total_amount": booking_ctx.get("total_amount"),
         }
+        response_payload["booking"] = booking_data
+        msg_metadata["booking"] = booking_data
+
     if booking_ctx.get("payment_order_id"):
-        response_payload["payment_order"] = {
+        payment_order_data = {
             "payment_id": booking_ctx.get("payment_id"),
             "order_id": booking_ctx.get("payment_order_id"),
             "amount": booking_ctx.get("payment_order_amount"),
             "currency": booking_ctx.get("payment_currency"),
         }
+        response_payload["payment_order"] = payment_order_data
+        msg_metadata["payment_order"] = payment_order_data
+
+    # Persist message history
+    try:
+        _save_chat_messages(
+            conversation_id=conversation_id,
+            user_message=user_text,
+            assistant_message=result["final_response"],
+            metadata=msg_metadata or None,
+        )
+    except Exception as exc:
+        print(f"[CHAT PERSISTENCE] Warning saving messages: {exc}")
+
+    # Background title generation on first message
+    if is_new:
+        fallback_title = user_text[:60].strip() or "New Booking Chat"
+        background_tasks.add_task(
+            _generate_and_update_title,
+            conversation_id=conversation_id,
+            fallback_title=fallback_title,
+            user_message=user_text,
+        )
 
     return response_payload
 
@@ -684,28 +827,62 @@ def chat_with_agent(
 @app.post("/api/v1/chat/approval")
 def approve_agent_action(
     request: Request,
-    response: Response,
     approval_request: AgentApprovalRequest,
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
     Approve or reject a pending human-in-the-loop agent action.
 
-    This endpoint must only be called after /api/v1/chat returns
-    approval_required=true. It resumes the existing LangGraph thread and
-    never starts a new conversation.
+    Resumes the existing LangGraph thread and persists the approval turn.
     """
-
     _check_agent_rate_limit(current_user)
 
-    conversation_id = request.cookies.get("bus_booking_conversation_id")
+    conversation_id = approval_request.conversation_id or request.cookies.get("bus_booking_conversation_id")
     if not conversation_id:
         raise HTTPException(
             status_code=400,
             detail="No active conversation thread found to approve. Start a booking flow first.",
         )
+    try:
+        conv_uuid = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid conversation ID format.",
+        )
 
     thread_id = f"{current_user.id}:{conversation_id}"
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("""
+                SELECT id FROM conversations 
+                WHERE id = :id AND auth_user_id = :user_id
+            """),
+            {"id": str(conv_uuid), "user_id": str(current_user.id)},
+        ).mappings().first()
+
+    if not row:
+        # If not in conversations table, check if an active thread exists in LangGraph (e.g. tests or legacy session)
+        chk = graph.get_state({"configurable": {"thread_id": thread_id, "current_user": current_user}})
+        if chk and chk.values:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("""
+                            INSERT INTO conversations (id, auth_user_id, title)
+                            VALUES (:id, :user_id, 'Booking Flow')
+                            ON CONFLICT (id) DO NOTHING
+                        """),
+                        {"id": str(conv_uuid), "user_id": str(current_user.id)},
+                    )
+            except Exception as e:
+                print(f"[APPROVAL AUTO-CREATE] {e}")
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail="Conversation not found or access denied.",
+            )
 
     try:
         result = run_agent(
@@ -731,26 +908,379 @@ def approve_agent_action(
         "response": result["final_response"],
     }
 
+    msg_metadata: dict = {}
     if result.get("__interrupt__"):
         response_payload["approval_required"] = True
+        msg_metadata["approval_required"] = True
 
     booking_ctx = result.get("booking_context", {})
     if booking_ctx.get("booking_id"):
-        response_payload["booking"] = {
+        booking_data = {
             "booking_id": booking_ctx.get("booking_id"),
             "booking_reference": booking_ctx.get("booking_reference"),
             "status": booking_ctx.get("booking_status"),
             "total_amount": booking_ctx.get("total_amount"),
         }
+        response_payload["booking"] = booking_data
+        msg_metadata["booking"] = booking_data
+
     if booking_ctx.get("payment_order_id"):
-        response_payload["payment_order"] = {
+        payment_order_data = {
             "payment_id": booking_ctx.get("payment_id"),
             "order_id": booking_ctx.get("payment_order_id"),
             "amount": booking_ctx.get("payment_order_amount"),
             "currency": booking_ctx.get("payment_currency"),
         }
+        response_payload["payment_order"] = payment_order_data
+        msg_metadata["payment_order"] = payment_order_data
+
+    # Persist decision turn
+    try:
+        decision_label = (
+            "Approved the action"
+            if approval_request.approval_decision == "approve"
+            else "Rejected the action"
+        )
+        _save_chat_messages(
+            conversation_id=conversation_id,
+            user_message=decision_label,
+            assistant_message=result["final_response"],
+            metadata=msg_metadata or None,
+        )
+    except Exception as exc:
+        print(f"[APPROVAL PERSISTENCE] Warning saving decision: {exc}")
 
     return response_payload
+
+
+# ============================================================
+# Conversations REST API
+# ============================================================
+
+
+@app.get("/api/v1/conversations")
+def list_conversations(
+    limit: int = Query(default=20, ge=1, le=100),
+    cursor: str | None = Query(default=None),
+    cursor_id: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    List conversations for the authenticated user, newest first, with cursor pagination
+    and optional case-insensitive title search.
+    """
+    params: dict = {
+        "user_id": str(current_user.id),
+        "fetch_limit": limit + 1,
+    }
+
+    where_clauses = ["auth_user_id = :user_id"]
+
+    if search and search.strip():
+        where_clauses.append("title ILIKE :search_pattern")
+        params["search_pattern"] = f"%{search.strip()}%"
+
+    if cursor and cursor_id:
+        try:
+            cursor_dt = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
+            cursor_uuid = UUID(cursor_id)
+            where_clauses.append("(updated_at, id) < (:cursor_dt, :cursor_uuid)")
+            params["cursor_dt"] = cursor_dt
+            params["cursor_uuid"] = str(cursor_uuid)
+        except Exception:
+            pass
+
+    query_str = f"""
+        SELECT id, title, created_at, updated_at
+        FROM conversations
+        WHERE {' AND '.join(where_clauses)}
+        ORDER BY updated_at DESC, id DESC
+        LIMIT :fetch_limit
+    """
+
+    with engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(text(query_str), params).mappings().fetchall()]
+
+    has_more = len(rows) > limit
+    returned_rows = rows[:limit]
+
+    next_cursor = None
+    next_cursor_id = None
+    if has_more and returned_rows:
+        last_item = returned_rows[-1]
+        next_cursor = (
+            last_item["updated_at"].isoformat()
+            if isinstance(last_item["updated_at"], datetime)
+            else str(last_item["updated_at"])
+        )
+        next_cursor_id = str(last_item["id"])
+
+    # Convert timestamps and UUIDs for JSON serialization
+    serialized = []
+    for r in returned_rows:
+        serialized.append({
+            "id": str(r["id"]),
+            "title": r["title"],
+            "created_at": (
+                r["created_at"].isoformat()
+                if isinstance(r["created_at"], datetime)
+                else str(r["created_at"])
+            ),
+            "updated_at": (
+                r["updated_at"].isoformat()
+                if isinstance(r["updated_at"], datetime)
+                else str(r["updated_at"])
+            ),
+        })
+
+    return {
+        "success": True,
+        "conversations": serialized,
+        "next_cursor": next_cursor,
+        "next_cursor_id": next_cursor_id,
+        "has_more": has_more,
+    }
+
+
+@app.get("/api/v1/conversations/{conversation_id}")
+def get_conversation_details(
+    conversation_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Retrieve conversation messages, plus authoritative pending approval (from LangGraph)
+    and validated active payment order and confirmed ticket.
+    """
+    try:
+        conv_uuid = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid conversation ID format.")
+
+    with engine.connect() as conn:
+        conv_row = conn.execute(
+            text("""
+                SELECT id, title, created_at, updated_at
+                FROM conversations
+                WHERE id = :id AND auth_user_id = :user_id
+            """),
+            {"id": str(conv_uuid), "user_id": str(current_user.id)},
+        ).mappings().first()
+
+        if not conv_row:
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+
+        msg_rows = conn.execute(
+            text("""
+                SELECT id, role, content, metadata, created_at
+                FROM chat_messages
+                WHERE conversation_id = :id
+                ORDER BY created_at ASC
+            """),
+            {"id": str(conv_uuid)},
+        ).mappings().fetchall()
+
+    messages = []
+    for m in msg_rows:
+        meta = m["metadata"]
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = None
+        messages.append({
+            "id": str(m["id"]),
+            "role": m["role"],
+            "content": m["content"],
+            "metadata": meta,
+            "created_at": (
+                m["created_at"].isoformat()
+                if isinstance(m["created_at"], datetime)
+                else str(m["created_at"])
+            ),
+        })
+
+    # Read LangGraph state for authoritative interrupts and booking context
+    thread_id = f"{current_user.id}:{conversation_id}"
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "current_user": current_user,
+        }
+    }
+
+    pending_approval = None
+    pending_payment_order = None
+    confirmed_ticket = None
+
+    try:
+        checkpoint = graph.get_state(config)
+        if checkpoint and checkpoint.tasks:
+            for task in checkpoint.tasks:
+                interrupts = getattr(task, "interrupts", ())
+                if interrupts:
+                    first_int = interrupts[0]
+                    val = getattr(first_int, "value", {})
+                    msg = val.get("message") if isinstance(val, dict) else str(val)
+                    pending_approval = {
+                        "prompt": msg or "Please approve or reject this action."
+                    }
+                    break
+
+        existing_values = checkpoint.values if checkpoint else {}
+        booking_ctx = existing_values.get("booking_context", {}) if existing_values else {}
+
+        # Validate pending payment order (hold must be ACTIVE and not expired)
+        if booking_ctx.get("payment_order_id") and booking_ctx.get("hold_id"):
+            hold_id = booking_ctx.get("hold_id")
+            order_id = booking_ctx.get("payment_order_id")
+
+            with engine.connect() as conn:
+                hold_row = conn.execute(
+                    text("SELECT status, expires_at FROM seat_holds WHERE id = :h_id"),
+                    {"h_id": hold_id},
+                ).mappings().first()
+                pay_row = conn.execute(
+                    text("SELECT status FROM payments WHERE provider_order_id = :o_id"),
+                    {"o_id": order_id},
+                ).mappings().first()
+
+            is_hold_valid = False
+            if hold_row and hold_row["status"] == "ACTIVE":
+                exp = hold_row["expires_at"]
+                if exp:
+                    if exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=timezone.utc)
+                    if exp > datetime.now(timezone.utc):
+                        is_hold_valid = True
+
+            is_pay_valid = pay_row and pay_row["status"] == "PENDING"
+
+            if is_hold_valid and is_pay_valid:
+                pending_payment_order = {
+                    "payment_order": {
+                        "payment_id": booking_ctx.get("payment_id"),
+                        "order_id": booking_ctx.get("payment_order_id"),
+                        "amount": booking_ctx.get("payment_order_amount"),
+                        "currency": booking_ctx.get("payment_currency"),
+                    },
+                    "booking": {
+                        "booking_id": booking_ctx.get("booking_id"),
+                        "booking_reference": booking_ctx.get("booking_reference"),
+                        "status": booking_ctx.get("booking_status"),
+                        "total_amount": booking_ctx.get("total_amount"),
+                    },
+                }
+
+        # Check confirmed ticket if booking completed
+        booking_id = booking_ctx.get("booking_id")
+        if booking_id:
+            with engine.connect() as conn:
+                b_row = conn.execute(
+                    text("SELECT status FROM bookings WHERE id = :b_id"),
+                    {"b_id": booking_id},
+                ).mappings().first()
+            if b_row and b_row["status"] == "CONFIRMED":
+                confirmed_ticket = _get_confirmed_ticket_details(UUID(str(booking_id)))
+
+    except Exception as exc:
+        print(f"[CONVERSATION RESTORE] Warning reading LangGraph state: {exc}")
+
+    return {
+        "success": True,
+        "id": str(conv_row["id"]),
+        "title": conv_row["title"],
+        "created_at": (
+            conv_row["created_at"].isoformat()
+            if isinstance(conv_row["created_at"], datetime)
+            else str(conv_row["created_at"])
+        ),
+        "updated_at": (
+            conv_row["updated_at"].isoformat()
+            if isinstance(conv_row["updated_at"], datetime)
+            else str(conv_row["updated_at"])
+        ),
+        "messages": messages,
+        "pending_approval": pending_approval,
+        "pending_payment_order": pending_payment_order,
+        "confirmed_ticket": confirmed_ticket,
+    }
+
+
+@app.patch("/api/v1/conversations/{conversation_id}")
+def rename_conversation(
+    conversation_id: str,
+    request_data: RenameConversationRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Rename a conversation owned by the authenticated user."""
+    try:
+        conv_uuid = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid conversation ID format.")
+
+    new_title = request_data.title.strip()
+    if not new_title:
+        raise HTTPException(status_code=400, detail="Title cannot be empty.")
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            text("""
+                UPDATE conversations
+                SET title = :title, updated_at = NOW()
+                WHERE id = :id AND auth_user_id = :user_id
+            """),
+            {"id": str(conv_uuid), "title": new_title, "user_id": str(current_user.id)},
+        )
+
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Conversation not found or access denied.")
+
+    return {
+        "success": True,
+        "id": conversation_id,
+        "title": new_title,
+    }
+
+
+@app.delete("/api/v1/conversations/{conversation_id}")
+def delete_conversation(
+    conversation_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Delete a conversation and its messages, and clear LangGraph thread checkpoints.
+    """
+    try:
+        conv_uuid = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid conversation ID format.")
+
+    thread_id = f"{current_user.id}:{conversation_id}"
+
+    # Clean up LangGraph checkpointer
+    try:
+        checkpointer.delete_thread(thread_id)
+    except Exception as exc:
+        print(f"[CONVERSATION DELETE] Warning cleaning up checkpoints: {exc}")
+
+    # Delete database record (cascades chat_messages)
+    with engine.begin() as conn:
+        result = conn.execute(
+            text("""
+                DELETE FROM conversations
+                WHERE id = :id AND auth_user_id = :user_id
+            """),
+            {"id": str(conv_uuid), "user_id": str(current_user.id)},
+        )
+
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Conversation not found or access denied.")
+
+    return {
+        "success": True,
+        "id": conversation_id,
+    }
 
 
 # ============================================================

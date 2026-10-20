@@ -1,9 +1,7 @@
 "use client";
 
-import React from "react";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { CreditCard, Loader2, RefreshCw, ShieldAlert, Sparkles } from "lucide-react";
 import type { BookingSummary, PaymentOrderSummary } from "@/types/bus-booking";
 
 interface PaymentCardProps {
@@ -28,12 +26,9 @@ export function PaymentCard({
   return (
     <Card className="border-indigo-300 dark:border-indigo-800 bg-indigo-50/60 dark:bg-indigo-950/20 shadow-sm mt-3 mb-2">
       <CardHeader className="pb-2 pt-4 px-4 flex flex-row items-center justify-between">
-        <div className="flex items-center gap-2 text-indigo-700 dark:text-indigo-400">
-          <CreditCard className="w-5 h-5 flex-shrink-0" />
-          <CardTitle className="text-sm font-semibold tracking-wide uppercase">
-            Payment Order Initiated
-          </CardTitle>
-        </div>
+        <CardTitle className="text-sm font-semibold tracking-wide uppercase text-indigo-700 dark:text-indigo-400">
+          Payment Order Initiated
+        </CardTitle>
         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-300">
           PAYMENT PENDING
         </span>
@@ -61,19 +56,16 @@ export function PaymentCard({
         </div>
 
         {isVerifying ? (
-          <div className="flex items-center gap-2.5 p-2.5 bg-blue-50/80 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900 rounded-md text-xs text-blue-700 dark:text-blue-300">
-            <Loader2 className="w-4 h-4 animate-spin flex-shrink-0" />
-            <span>Verifying Razorpay payment signature & finalizing booking...</span>
+          <div className="p-2.5 bg-blue-50/80 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900 rounded-md text-xs text-blue-700 dark:text-blue-300">
+            Verifying Razorpay payment signature &amp; finalizing booking...
           </div>
         ) : isPaymentOpen ? (
-          <div className="flex items-center gap-2 p-2.5 bg-amber-50/80 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 rounded-md text-xs text-amber-700 dark:text-amber-300">
-            <Sparkles className="w-4 h-4 flex-shrink-0 animate-pulse" />
-            <span>Razorpay Checkout modal is currently open. Please complete the test payment.</span>
+          <div className="p-2.5 bg-amber-50/80 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 rounded-md text-xs text-amber-700 dark:text-amber-300">
+            Razorpay Checkout modal is currently open. Please complete the test payment.
           </div>
         ) : (
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <ShieldAlert className="w-4 h-4 flex-shrink-0 text-muted-foreground" />
-            <span>Secure 256-bit encrypted checkout via Razorpay test gateway.</span>
+          <div className="text-xs text-muted-foreground">
+            Secure 256-bit encrypted checkout via Razorpay test gateway.
           </div>
         )}
       </CardContent>
@@ -87,21 +79,10 @@ export function PaymentCard({
             disabled={disabled || isPaymentOpen || isVerifying}
             className="bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm"
           >
-            {isPaymentOpen ? (
-              <>
-                <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
-                Checkout Open...
-              </>
-            ) : (
-              <>
-                <RefreshCw className="w-4 h-4 mr-1.5" />
-                Open Razorpay Checkout
-              </>
-            )}
+            {isPaymentOpen ? "Checkout Open..." : "Open Razorpay Checkout"}
           </Button>
         )}
       </CardFooter>
     </Card>
   );
 }
-

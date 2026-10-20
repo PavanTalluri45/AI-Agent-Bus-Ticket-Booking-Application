@@ -1,4 +1,4 @@
-import os
+﻿import os
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -485,6 +485,220 @@ def test_availability_request_without_stop_selection_asks_user(monkeypatch):
     assert "Boarding stops: Hyderabad" in result["final_response"]
     assert "Drop-off stops: Bangalore" in result["final_response"]
     assert result["booking_context"]["boarding_stops"]
+
+
+# ============================================================================
+# Stop Resolution: Natural Language Input Variants
+# ============================================================================
+
+
+# Shared fixture for stop resolution tests (no DB needed)
+STOP_CONTEXT_WITH_LISTS: BookingContext = {
+    "schedule_id": SCHEDULE_ID,
+    "available_schedules": [{"schedule_id": SCHEDULE_ID}],
+    "boarding_stops": [
+        {"stop_id": BOARDING_STOP_ID, "stop_name": "Bangalore"},
+    ],
+    "dropping_stops": [
+        {"stop_id": DROPPING_STOP_ID, "stop_name": "Chennai"},
+    ],
+}
+
+
+def _make_resolved(msg: str) -> BookingContext:
+    """Run resolve_booking_context against STOP_CONTEXT_WITH_LISTS and return result."""
+    return resolve_booking_context(STOP_CONTEXT_WITH_LISTS, msg)
+
+
+# ---- Original format still works ------------------------------------------
+
+def test_stop_resolution_original_format():
+    """Original 'Board from X and drop at Y' format continues to work."""
+    resolved = _make_resolved("Board from Bangalore and drop at Chennai.")
+    assert resolved.get("boarding_stop_id") == BOARDING_STOP_ID, "boarding stop not resolved"
+    assert resolved.get("dropping_stop_id") == DROPPING_STOP_ID, "dropping stop not resolved"
+    assert resolved.get("boarding_stop_name") == "Bangalore"
+    assert resolved.get("dropping_stop_name") == "Chennai"
+
+
+# ---- New formats that previously failed -----------------------------------
+
+def test_stop_resolution_boarding_stop_keyword():
+    """'Boarding stop X and dropping stop Y' is resolved correctly."""
+    resolved = _make_resolved("Boarding stop Bangalore and dropping stop Chennai")
+    assert resolved.get("boarding_stop_id") == BOARDING_STOP_ID
+    assert resolved.get("dropping_stop_id") == DROPPING_STOP_ID
+
+
+def test_stop_resolution_is_phrasing():
+    """'My boarding stop is X and dropping stop is Y' is resolved correctly."""
+    resolved = _make_resolved("My boarding stop is Bangalore and dropping stop is Chennai")
+    assert resolved.get("boarding_stop_id") == BOARDING_STOP_ID
+    assert resolved.get("dropping_stop_id") == DROPPING_STOP_ID
+
+
+def test_stop_resolution_board_at_get_down():
+    """'I want to board at X and get down at Y' is resolved correctly."""
+    resolved = _make_resolved("I want to board at Bangalore and get down at Chennai")
+    assert resolved.get("boarding_stop_id") == BOARDING_STOP_ID
+    assert resolved.get("dropping_stop_id") == DROPPING_STOP_ID
+
+
+def test_stop_resolution_from_to_explicit():
+    """'From X to Y' with explicit keyword is resolved correctly."""
+    resolved = _make_resolved("From Bangalore to Chennai")
+    assert resolved.get("boarding_stop_id") == BOARDING_STOP_ID
+    assert resolved.get("dropping_stop_id") == DROPPING_STOP_ID
+
+
+def test_stop_resolution_city_to_city_bare():
+    """'Bangalore to Chennai' (bare, no keyword) uses positional fallback."""
+    resolved = _make_resolved("Bangalore to Chennai")
+    assert resolved.get("boarding_stop_id") == BOARDING_STOP_ID
+    assert resolved.get("dropping_stop_id") == DROPPING_STOP_ID
+
+
+def test_stop_resolution_colon_format():
+    """'Boarding: X, Dropping: Y' colon-separated format is resolved correctly."""
+    resolved = _make_resolved("Boarding: Bangalore, Dropping: Chennai")
+    assert resolved.get("boarding_stop_id") == BOARDING_STOP_ID
+    assert resolved.get("dropping_stop_id") == DROPPING_STOP_ID
+
+
+# ---- Partial input: only one stop provided --------------------------------
+
+def test_stop_resolution_only_boarding_provided():
+    """When only the boarding stop is mentioned, only boarding is resolved."""
+    resolved = _make_resolved("Boarding stop Bangalore")
+    assert resolved.get("boarding_stop_id") == BOARDING_STOP_ID, "boarding stop must be set"
+    # dropping stop must NOT be guessed
+    assert resolved.get("dropping_stop_id") is None, "dropping stop must not be invented"
+
+
+# ---- Ambiguous / unrelated input -----------------------------------------
+
+def test_stop_resolution_ambiguous_message_does_not_resolve():
+    """A generic message with no stop names must not resolve either stop."""
+    context: BookingContext = {
+        "schedule_id": SCHEDULE_ID,
+        "boarding_stops": [
+            {"stop_id": BOARDING_STOP_ID, "stop_name": "Bangalore"},
+        ],
+        "dropping_stops": [
+            {"stop_id": DROPPING_STOP_ID, "stop_name": "Chennai"},
+        ],
+    }
+    resolved = resolve_booking_context(context, "What seats are available?")
+    assert resolved.get("boarding_stop_id") is None
+    assert resolved.get("dropping_stop_id") is None
+
+
+def test_stop_resolution_case_insensitive():
+    """Stop names in any capitalisation are matched correctly."""
+    resolved = _make_resolved("boarding stop bangalore and dropping stop chennai")
+    assert resolved.get("boarding_stop_id") == BOARDING_STOP_ID
+    assert resolved.get("dropping_stop_id") == DROPPING_STOP_ID
+
+
+def test_stop_resolution_does_not_guess_when_ambiguous_stops():
+    """When multiple distinct stops match or user mentions two stops, neither is resolved."""
+    context: BookingContext = {
+        "schedule_id": SCHEDULE_ID,
+        "boarding_stops": [
+            {"stop_id": BOARDING_STOP_ID, "stop_name": "Bangalore East"},
+            {"stop_id": "00000000-0000-0000-0000-000000000099", "stop_name": "Bangalore West"},
+        ],
+        "dropping_stops": [
+            {"stop_id": DROPPING_STOP_ID, "stop_name": "Chennai"},
+        ],
+    }
+    # Neither East nor West is specified by the user
+    resolved = resolve_booking_context(context, "From Bangalore to Chennai")
+    assert resolved.get("boarding_stop_id") is None, "unmatched/ambiguous boarding stop must not be resolved"
+    assert resolved.get("dropping_stop_id") == DROPPING_STOP_ID
+
+    # Both East and West mentioned by the user -> ambiguous
+    resolved_both = resolve_booking_context(context, "Board from Bangalore East or Bangalore West and drop at Chennai")
+    assert resolved_both.get("boarding_stop_id") is None, "multiple mentioned boarding stops must not be resolved"
+    assert resolved_both.get("dropping_stop_id") == DROPPING_STOP_ID
+
+
+def test_stop_resolution_prefers_specific_longer_stop_name():
+    """When a stop name contains another (Bangalore City vs Bangalore), user typing the full name resolves cleanly."""
+    city_stop_id = "00000000-0000-0000-0000-000000000099"
+    context: BookingContext = {
+        "schedule_id": SCHEDULE_ID,
+        "boarding_stops": [
+            {"stop_id": BOARDING_STOP_ID, "stop_name": "Bangalore"},
+            {"stop_id": city_stop_id, "stop_name": "Bangalore City"},
+        ],
+        "dropping_stops": [
+            {"stop_id": DROPPING_STOP_ID, "stop_name": "Chennai"},
+        ],
+    }
+    resolved = resolve_booking_context(context, "From Bangalore City to Chennai")
+    assert resolved.get("boarding_stop_id") == city_stop_id
+    assert resolved.get("dropping_stop_id") == DROPPING_STOP_ID
+
+
+def test_partial_stop_selection_prompts_only_for_missing_stop():
+    """When one stop is already resolved, format_stop_selection_prompt asks only for the other."""
+    from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
+        format_stop_selection_prompt,
+    )
+    context_with_boarding: BookingContext = {
+        "boarding_stop_id": BOARDING_STOP_ID,
+        "boarding_stop_name": "Bangalore",
+        "boarding_stops": [{"stop_id": BOARDING_STOP_ID, "stop_name": "Bangalore"}],
+        "dropping_stops": [{"stop_id": DROPPING_STOP_ID, "stop_name": "Chennai"}],
+    }
+    prompt = format_stop_selection_prompt(context_with_boarding)
+    assert "Boarding stop is set to Bangalore" in prompt
+    assert "Please choose your dropping stop" in prompt
+    assert "Drop-off stops: Chennai" in prompt
+    assert "Boarding stops:" not in prompt
+
+
+def test_stop_resolution_after_clarification_continues_flow():
+    """After the agent asks for stops and user responds, both stops are resolved."""
+    # Simulate the state after get_bus_details returned stop options and
+    # the agent asked the user to choose.  The user now responds.
+    resolved = _make_resolved("I want to board at Bangalore and drop off at Chennai")
+    assert resolved.get("boarding_stop_id") == BOARDING_STOP_ID
+    assert resolved.get("dropping_stop_id") == DROPPING_STOP_ID
+
+
+def test_format_stop_selection_prompt_no_longer_shows_only_one_format():
+    """The stop-selection prompt should no longer funnel users into a single syntax."""
+    from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
+        format_stop_selection_prompt,
+    )
+    context: BookingContext = {
+        "boarding_stops": [{"stop_name": "Bangalore"}],
+        "dropping_stops": [{"stop_name": "Chennai"}],
+    }
+    prompt = format_stop_selection_prompt(context)
+    # The old rigid example "Board from <stop> and drop at <stop>." must be gone
+    assert "board from <stop> and drop at <stop>" not in prompt.lower()
+    # New prompt should mention multiple examples or "From <stop> to <stop>"
+    assert "from" in prompt.lower() and "to" in prompt.lower()
+
+
+def test_stop_resolution_unrelated_flow_unaffected():
+    """Resolving stops must not touch a context that has no stop lists loaded."""
+    context: BookingContext = {
+        "origin": "Bangalore",
+        "destination": "Chennai",
+        "travel_date": "2026-09-20",
+        "schedule_id": SCHEDULE_ID,
+    }
+    resolved = resolve_booking_context(context, "Board from Bangalore and drop at Chennai")
+    # No stop lists → nothing to resolve
+    assert resolved.get("boarding_stop_id") is None
+    assert resolved.get("dropping_stop_id") is None
+    # Other fields must be untouched
+    assert resolved["origin"] == "Bangalore"
+    assert resolved["schedule_id"] == SCHEDULE_ID
 
 
 def test_hold_context_does_not_require_available_seats(base_booking_context):

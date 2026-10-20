@@ -45,8 +45,52 @@ export interface ChatMessage {
   confirmedTicket?: ConfirmedTicketData;
 }
 
+export interface StoredChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  metadata?: {
+    approval_required?: boolean;
+    booking?: BookingSummary;
+    payment_order?: PaymentOrderSummary;
+  } | null;
+  created_at: string;
+}
+
+export interface ConversationListItem {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationListResponse {
+  success: boolean;
+  conversations: ConversationListItem[];
+  next_cursor: string | null;
+  next_cursor_id: string | null;
+  has_more: boolean;
+}
+
+export interface ConversationDetailResponse {
+  success: boolean;
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  messages: StoredChatMessage[];
+  pending_approval: { prompt: string } | null;
+  pending_payment_order: {
+    payment_order: PaymentOrderSummary;
+    booking: BookingSummary;
+  } | null;
+  confirmed_ticket: ConfirmedTicketData | null;
+  error?: string;
+}
+
 export interface ChatApiRequest {
   message: string;
+  conversation_id?: string;
 }
 
 export interface ChatApiResponse {
@@ -61,6 +105,11 @@ export interface ChatApiResponse {
 
 export interface ApprovalDecisionRequest {
   approval_decision: "approve" | "reject";
+  conversation_id: string;
+}
+
+export interface RenameConversationRequest {
+  title: string;
 }
 
 export interface PaymentVerifyRequest {
@@ -140,4 +189,3 @@ declare global {
     Razorpay?: new (options: RazorpayOptions) => RazorpayInstance;
   }
 }
-

@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import atexit
 import json
 import os
@@ -1137,38 +1137,126 @@ def _resolve_selected_stops(
     context: BookingContext,
     user_message: str,
 ) -> BookingContext:
-    """Resolve explicit human-readable boarding/dropping stop selections."""
+    """Resolve explicit human-readable boarding/dropping stop selections.
+
+    Accepts natural-language formats including:
+      - "Board from Bangalore and drop at Chennai"
+      - "Boarding stop Bangalore and dropping stop Chennai"
+      - "My boarding stop is Bangalore and dropping stop is Chennai"
+      - "I want to board at Bangalore and get down at Chennai"
+      - "From Bangalore to Chennai"
+      - "Bangalore to Chennai"
+      - "Boarding: Bangalore, Dropping: Chennai"
+      - "Boarding stop Bangalore" (partial input)
+    """
     message = _normalize_selection_text(user_message)
     resolved = context.copy()
 
-    def find_stop(
+    BOARDING_TRIGGERS: tuple[str, ...] = (
+        "board from",
+        "boarding point",
+        "boarding at",
+        "pickup from",
+        "pick up from",
+        "boarding stop",
+        "boarding:",
+        "boarding -",
+        "board at",
+        "i want to board",
+        "want to board at",
+        "board in",
+        "starting from",
+        "start from",
+        "from",
+    )
+
+    DROPPING_TRIGGERS: tuple[str, ...] = (
+        "get down at",
+        "drop at",
+        "dropping point",
+        "drop off at",
+        "destination stop",
+        "dropping stop",
+        "dropping:",
+        "dropping -",
+        "drop to",
+        "get off at",
+        "alight at",
+        "deboard at",
+        "destination is",
+        "to",
+    )
+
+    def find_matching_stop(
         stops: list[dict[str, Any]],
-        triggers: tuple[str, ...],
+        require_triggers: bool = False,
+        triggers: tuple[str, ...] = (),
     ) -> dict[str, Any] | None:
-        if not any(trigger in message for trigger in triggers):
+        if require_triggers and not any(t in message for t in triggers):
             return None
 
-        matches = []
+        # Find all stops that match as whole words in message
+        matches: list[tuple[dict[str, Any], list[tuple[int, int]]]] = []
         for stop in stops:
             stop_name = _normalize_selection_text(str(stop.get("stop_name", "")))
-            if stop_name and stop_name in message:
-                matches.append(stop)
+            if not stop_name:
+                continue
+            # Find all span occurrences of stop_name in message using word boundaries
+            spans = [
+                m.span()
+                for m in re.finditer(rf"\b{re.escape(stop_name)}\b", message)
+            ]
+            if spans:
+                matches.append((stop, spans))
 
-        return matches[0] if len(matches) == 1 else None
+        if not matches:
+            return None
 
-    boarding = find_stop(
-        context.get("boarding_stops", []),
-        ("board from", "boarding point", "boarding at", "pickup from", "pick up from"),
-    )
+        if len(matches) == 1:
+            return matches[0][0]
+
+        # If multiple stops matched, filter out any stop whose spans are
+        # entirely subsumed by a longer stop match (e.g. "Bangalore" inside "Bangalore City")
+        unsubsumed = []
+        for stop_a, spans_a in matches:
+            name_a = _normalize_selection_text(str(stop_a.get("stop_name", "")))
+            is_subsumed = False
+            for stop_b, spans_b in matches:
+                name_b = _normalize_selection_text(str(stop_b.get("stop_name", "")))
+                if len(name_b) > len(name_a):
+                    for start_b, end_b in spans_b:
+                        spans_a_remaining = [
+                            (s, e) for (s, e) in spans_a
+                            if not (start_b <= s and e <= end_b)
+                        ]
+                        if not spans_a_remaining:
+                            is_subsumed = True
+                            break
+                if is_subsumed:
+                    break
+            if not is_subsumed:
+                unsubsumed.append(stop_a)
+
+        return unsubsumed[0] if len(unsubsumed) == 1 else None
+
+    boarding_stops = context.get("boarding_stops", [])
+    dropping_stops = context.get("dropping_stops", [])
+
+    boarding = find_matching_stop(boarding_stops, require_triggers=True, triggers=BOARDING_TRIGGERS)
+    dropping = find_matching_stop(dropping_stops, require_triggers=True, triggers=DROPPING_TRIGGERS)
+
+    # Positional fallback when stops are loaded and trigger matching didn't resolve one/both
+    if boarding_stops and dropping_stops:
+        if boarding is None:
+            boarding = find_matching_stop(boarding_stops, require_triggers=False)
+        if dropping is None:
+            dropping = find_matching_stop(dropping_stops, require_triggers=False)
+
     if boarding and boarding.get("stop_id"):
         resolved["boarding_stop_id"] = str(boarding["stop_id"])
         resolved["boarding_stop_name"] = str(boarding.get("stop_name", ""))
         print(f"Application resolved boarding stop: {boarding['stop_id']}")
 
-    dropping = find_stop(
-        context.get("dropping_stops", []),
-        ("get down at", "drop at", "dropping point", "drop off at", "destination stop"),
-    )
     if dropping and dropping.get("stop_id"):
         resolved["dropping_stop_id"] = str(dropping["stop_id"])
         resolved["dropping_stop_name"] = str(dropping.get("stop_name", ""))
@@ -2127,12 +2215,30 @@ def format_stop_selection_prompt(
             "another bus or contact support."
         )
 
+    # If only boarding stop is selected, ask only for dropping stop
+    if context.get("boarding_stop_id") and not context.get("dropping_stop_id"):
+        boarding_name = context.get("boarding_stop_name") or "selected stop"
+        return (
+            f"Boarding stop is set to {boarding_name}. Please choose your dropping stop "
+            f"so we can check seat availability.\n"
+            f"Drop-off stops: {dropping_stops}."
+        )
+
+    # If only dropping stop is selected, ask only for boarding stop
+    if context.get("dropping_stop_id") and not context.get("boarding_stop_id"):
+        dropping_name = context.get("dropping_stop_name") or "selected stop"
+        return (
+            f"Dropping stop is set to {dropping_name}. Please choose your boarding stop "
+            f"so we can check seat availability.\n"
+            f"Boarding stops: {boarding_stops}."
+        )
+
     return (
         "Seat availability depends on the journey segment. Please choose "
         "where you want to board and where you want to get off.\n"
         f"Boarding stops: {boarding_stops}.\n"
         f"Drop-off stops: {dropping_stops}.\n"
-        "For example: \"Board from <stop> and drop at <stop>.\""
+        "For example: \"Boarding stop <stop> and dropping stop <stop>\" or \"From <stop> to <stop>\"."
     )
 
 

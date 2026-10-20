@@ -1,12 +1,15 @@
-"use client";
+﻿"use client";
 
 import React, { useState, useRef, useEffect } from "react";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
+import { useConversationsContext } from "@/context/ConversationsContext";
 import {
   sendChatMessage,
   sendApprovalDecision,
   verifyPayment,
+  getConversation,
 } from "@/lib/api/bus-agent";
 import { openRazorpayCheckout } from "@/lib/razorpay";
 import { ApprovalCard } from "./approval-card";
@@ -40,8 +43,22 @@ import type {
   ConfirmedTicketData,
 } from "@/types/bus-booking";
 
-export function BusBookingChat() {
+export interface BusBookingChatProps {
+  conversationId?: string;
+}
+
+export function BusBookingChat({ conversationId: initialConversationId }: BusBookingChatProps) {
   const { user } = useAuth();
+  const router = useRouter();
+  const { refresh } = useConversationsContext();
+
+  // Active Conversation ID
+  const [conversationId, setConversationId] = useState<string | null>(
+    initialConversationId || null,
+  );
+  const [isInitialLoading, setIsInitialLoading] = useState<boolean>(
+    Boolean(initialConversationId),
+  );
 
   // Chat State
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -70,6 +87,82 @@ export function BusBookingChat() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
+
+  // Restore conversation if an initial conversationId is provided
+  useEffect(() => {
+    if (!initialConversationId) return;
+
+    let isMounted = true;
+
+    getConversation(initialConversationId)
+      .then((data) => {
+        if (!isMounted) return;
+        if (data.success) {
+          setConversationId(data.id);
+
+          const loadedMessages: ChatMessage[] = data.messages.map((m) => {
+            const timeStr = m.created_at
+              ? new Date(m.created_at).toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })
+              : "";
+
+            return {
+              id: m.id,
+              role: m.role,
+              content: m.content,
+              timestamp: timeStr,
+              approvalRequired: m.metadata?.approval_required,
+              booking: m.metadata?.booking,
+              paymentOrder: m.metadata?.payment_order,
+            };
+          });
+
+          setMessages(loadedMessages);
+
+          // Restore pending approval if active in LangGraph
+          if (data.pending_approval) {
+            setApprovalRequired(true);
+            setPendingPrompt(data.pending_approval.prompt);
+          } else {
+            setApprovalRequired(false);
+            setPendingPrompt(null);
+          }
+
+          // Restore pending payment order if active & valid
+          if (data.pending_payment_order) {
+            setPaymentOrder(data.pending_payment_order.payment_order);
+            setActiveBooking(data.pending_payment_order.booking);
+          } else {
+            setPaymentOrder(null);
+            setActiveBooking(null);
+          }
+
+          // Restore confirmed ticket
+          if (data.confirmed_ticket) {
+            setConfirmedTicket(data.confirmed_ticket);
+          } else {
+            setConfirmedTicket(null);
+          }
+        }
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        setErrorMessage(
+          err instanceof Error
+            ? err.message
+            : "Failed to load conversation history.",
+        );
+      })
+      .finally(() => {
+        if (isMounted) setIsInitialLoading(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [initialConversationId]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -154,7 +247,6 @@ export function BusBookingChat() {
 
       const error = err as Error;
       if (error?.message === "PAYMENT_DISMISSED") {
-        // Modal dismissed by user without paying - not an API failure
         setMessages((prev) => [
           ...prev,
           {
@@ -207,7 +299,19 @@ export function BusBookingChat() {
     setIsLoading(true);
 
     try {
-      const data = await sendChatMessage(text);
+      const data = await sendChatMessage(text, conversationId || undefined);
+
+      // Seamlessly update URL on message 1 without unmounting component!
+      if (!conversationId && data.conversation_id) {
+        setConversationId(data.conversation_id);
+        window.history.replaceState({}, "", `/chat/${data.conversation_id}`);
+        // Refresh sidebar immediately
+        refresh();
+        // Refresh again after Gemini title generates in background
+        setTimeout(() => {
+          refresh();
+        }, 3500);
+      }
 
       const assistantMessage: ChatMessage = {
         id: `assistant-${Date.now()}`,
@@ -238,7 +342,6 @@ export function BusBookingChat() {
 
       if (data.payment_order) {
         setPaymentOrder(data.payment_order);
-        // Automatically open checkout
         await triggerRazorpayCheckout(data.payment_order, data.booking);
       }
     } catch (err: unknown) {
@@ -253,11 +356,16 @@ export function BusBookingChat() {
 
   // 2. Handle HITL Approve
   const handleApprove = async () => {
+    if (!conversationId) {
+      setErrorMessage("No active conversation found to approve.");
+      return;
+    }
+
     setIsLoading(true);
     setErrorMessage(null);
 
     try {
-      const data = await sendApprovalDecision("approve");
+      const data = await sendApprovalDecision("approve", conversationId);
 
       setApprovalRequired(false);
       setPendingPrompt(null);
@@ -282,7 +390,6 @@ export function BusBookingChat() {
 
       if (data.payment_order) {
         setPaymentOrder(data.payment_order);
-        // Automatically open checkout upon booking approval
         await triggerRazorpayCheckout(data.payment_order, data.booking);
       }
     } catch (err: unknown) {
@@ -295,11 +402,16 @@ export function BusBookingChat() {
 
   // 3. Handle HITL Reject
   const handleReject = async () => {
+    if (!conversationId) {
+      setErrorMessage("No active conversation found to reject.");
+      return;
+    }
+
     setIsLoading(true);
     setErrorMessage(null);
 
     try {
-      const data = await sendApprovalDecision("reject");
+      const data = await sendApprovalDecision("reject", conversationId);
 
       setApprovalRequired(false);
       setPendingPrompt(null);
@@ -324,30 +436,11 @@ export function BusBookingChat() {
   };
 
   const handleBookAnother = () => {
-    setConfirmedTicket(null);
-    setPaymentOrder(null);
-    setActiveBooking(null);
-    setApprovalRequired(false);
-    setPendingPrompt(null);
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: `new-search-${Date.now()}`,
-        role: "assistant",
-        content:
-          "Where would you like to travel next? Please enter your origin, destination, and travel date.",
-        timestamp: new Date().toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        }),
-      },
-    ]);
+    router.push("/chat");
   };
 
   const isInputDisabled =
-    isLoading || approvalRequired || isPaymentOpen || isVerifying;
-
-
+    isLoading || approvalRequired || isPaymentOpen || isVerifying || isInitialLoading;
 
   const displayName =
     user?.user_metadata?.full_name ||
@@ -356,7 +449,6 @@ export function BusBookingChat() {
     "there";
 
   const handleSuggestion = (from: string, to: string) => {
-    // Today's date as local YYYY-MM-DD (computed on click, so no SSR mismatch)
     const today = new Date().toLocaleDateString("en-CA");
     setInputValue(`Find buses from ${from} to ${to} on ${today}`);
     inputRef.current?.focus();
@@ -366,13 +458,24 @@ export function BusBookingChat() {
     user?.user_metadata?.avatar_url || user?.user_metadata?.picture || "";
   const userInitial = (user ? displayName : "U").charAt(0).toUpperCase();
 
+  if (isInitialLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center h-[calc(100vh-7.5rem)] max-w-4xl mx-auto w-full gap-3 text-muted-foreground text-sm">
+        <Loader2 className="size-6 animate-spin text-primary" />
+        <span>Loading conversation</span>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-[calc(100vh-7.5rem)] max-w-4xl mx-auto w-full">
       {/* Empty (initial) state */}
       {messages.length === 0 ? (
         <Empty>
           <EmptyHeader>
-            <EmptyTitle className="text-[36px] leading-[40px] bg-gradient-to-r from-[rgb(81,175,230)] via-[rgb(53,95,242)] to-[rgb(17,40,122)] bg-clip-text text-transparent">Hi, {displayName}</EmptyTitle>
+            <EmptyTitle className="text-[36px] leading-[40px] bg-gradient-to-r from-[rgb(81,175,230)] via-[rgb(53,95,242)] to-[rgb(17,40,122)] bg-clip-text text-transparent">
+              Hi, {displayName}
+            </EmptyTitle>
             <EmptyDescription>
               Tell the agent your route and date. It will search buses, help you
               pick a seat and take you through secure payment.
@@ -540,7 +643,7 @@ export function BusBookingChat() {
       )}
 
       {/* Input Form Bar */}
-      <div className="pt-2 sm:pt-3">
+      <div className="pt-2 sm:pt-3 pb-1 sm:pb-2">
         <form ref={formRef} onSubmit={handleSendMessage}>
           <InputGroup>
             <InputGroupTextarea
@@ -554,7 +657,7 @@ export function BusBookingChat() {
                     ? "Verifying payment with server..."
                     : isPaymentOpen
                       ? "Complete payment in Razorpay modal..."
-                      : "Type your message (e.g. 'I want seat 1B', 'Search buses to Chennai')..."
+                      : "Type your message"
               }
               disabled={isInputDisabled}
               onKeyDown={(e) => {
