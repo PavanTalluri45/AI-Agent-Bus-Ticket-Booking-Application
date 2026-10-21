@@ -16,13 +16,13 @@ export default function ChatLayout({
   return (
     <ConversationsProvider>
       <TooltipProvider delay={100}>
-        <SidebarProvider className="has-data-[variant=inset]:bg-transparent">
+        <SidebarProvider className="h-svh min-h-0 overflow-hidden has-data-[variant=inset]:bg-transparent">
           <AppSidebar />
-          <SidebarInset className="bg-transparent flex flex-col h-screen overflow-hidden">
+          <SidebarInset className="bg-transparent flex flex-col min-h-0 overflow-hidden">
             <header className="flex h-14 shrink-0 items-center gap-2 px-4">
               <SidebarTrigger className="-ml-1" />
             </header>
-            <main className="flex-1 overflow-hidden p-3 sm:p-5">
+            <main className="flex-1 min-h-0 overflow-hidden p-3 sm:p-5">
               {children}
             </main>
           </SidebarInset>

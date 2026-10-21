@@ -33,7 +33,7 @@ import { Monitor } from "lucide-react"
 import { Sun } from "lucide-react"
 import { Moon } from "lucide-react"
 
-const SIGN_IN_PATH = "/sign-in"
+const SIGN_IN_PATH = "/"
 
 const THEMES = [
   { value: "system", label: "System", icon: Monitor },

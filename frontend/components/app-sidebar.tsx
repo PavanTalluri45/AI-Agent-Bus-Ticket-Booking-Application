@@ -12,13 +12,14 @@ import {
   SidebarHeader,
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
-import { SquarePen } from "lucide-react";
+import { Plus } from "lucide-react";
 import { useConversationsContext } from "@/context/ConversationsContext";
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const {
     conversations,
     isLoading,
+    error,
     hasMore,
     loadMore,
     rename,
@@ -45,14 +46,15 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         </div>
 
         {/* New Chat Button */}
-        <div className="px-1 pt-1">
+        <div>
           <Button
             variant="ghost"
-            className="w-full justify-start gap-2 h-10 text-sm font-medium shadow-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+            nativeButton={false}
+            className="w-full mt-3 justify-start gap-3 h-10 text-sm font-medium shadow-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
             render={<Link href="/chat" />}
           >
-            <SquarePen className="size-4 shrink-0 text-muted-foreground" />
-            <span>New Chat</span>
+            <Plus className="size-4 shrink-0 text-muted-foreground" />
+            <span>New</span>
           </Button>
         </div>
       </SidebarHeader>
@@ -61,6 +63,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         <NavHistory
           conversations={conversations}
           isLoading={isLoading}
+          error={error}
           hasMore={hasMore}
           onLoadMore={loadMore}
           onRename={rename}

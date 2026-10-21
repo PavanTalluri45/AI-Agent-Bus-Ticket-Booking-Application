@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Literal
 from uuid import UUID, uuid4
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
@@ -585,55 +585,17 @@ def _check_agent_rate_limit(current_user: AuthenticatedUser) -> None:
         )
 
 
-def _generate_and_update_title(
-    conversation_id: str,
-    fallback_title: str,
-    user_message: str,
-) -> None:
-    """
-    Generate a 3-5 word concise title using Gemini and update the conversation
-    ONLY IF the title has not been modified by the user in the meantime.
-    """
-    try:
-        prompt = (
-            "Generate a very short, concise title (maximum 4-5 words, no quotation marks) "
-            "summarizing this bus ticket travel query:\n\n"
-            f"{user_message}"
-        )
-        response = gemini_client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-        )
-        new_title = response.text.strip().replace('"', '').replace("'", "")
-        if new_title and len(new_title) <= 80:
-            with engine.begin() as conn:
-                conn.execute(
-                    text("""
-                        UPDATE conversations 
-                        SET title = :title 
-                        WHERE id = :id AND title = :fallback_title
-                    """),
-                    {
-                        "id": conversation_id,
-                        "title": new_title,
-                        "fallback_title": fallback_title,
-                    },
-                )
-    except Exception as exc:
-        print(f"[TITLE GENERATION] Warning generating title: {exc}")
-
-
 def _get_or_create_conversation(
     current_user: AuthenticatedUser,
     conversation_id: str | None,
     first_message: str,
-) -> tuple[str, str, bool]:
+) -> tuple[str, str]:
     """
     Verify conversation ownership if ID is provided, or create a new conversation
-    with a fallback title derived from the first user message.
+    with the user's first message as its conversation title.
 
     Returns:
-        (conversation_id, thread_id, is_new)
+        (conversation_id, thread_id)
     """
     if conversation_id:
         try:
@@ -649,8 +611,8 @@ def _get_or_create_conversation(
         with engine.connect() as conn:
             row = conn.execute(
                 text("""
-                    SELECT id FROM conversations 
-                    WHERE id = :id AND auth_user_id = :user_id
+                    SELECT id FROM conversations
+                    WHERE id = :id AND auth_user_id = :user_id AND deleted_at IS NULL
                 """),
                 {"id": str(conv_uuid), "user_id": str(current_user.id)},
             ).mappings().first()
@@ -662,10 +624,10 @@ def _get_or_create_conversation(
             )
 
         thread_id = f"{current_user.id}:{conversation_id}"
-        return conversation_id, thread_id, False
+        return conversation_id, thread_id
 
     # New conversation creation
-    fallback_title = first_message[:60].strip() or "New Booking Chat"
+    title = first_message.strip() or "New Booking Chat"
     with engine.begin() as conn:
         new_row = conn.execute(
             text("""
@@ -673,46 +635,79 @@ def _get_or_create_conversation(
                 VALUES (:user_id, :title)
                 RETURNING id
             """),
-            {"user_id": str(current_user.id), "title": fallback_title},
+            {"user_id": str(current_user.id), "title": title},
         ).mappings().first()
 
     new_conv_id = str(new_row["id"])
     thread_id = f"{current_user.id}:{new_conv_id}"
-    return new_conv_id, thread_id, True
+    return new_conv_id, thread_id
 
 
-def _save_chat_messages(
+def _create_pending_turn(
     conversation_id: str,
     user_message: str,
+) -> str:
+    """
+    Persist the user message immediately as a pending conversation turn with
+    assistant_message = NULL. Locks the parent conversation row to serialise
+    turn_number allocation under concurrent requests.
+
+    Returns the new turn's UUID so the caller can later complete it via
+    _complete_turn() once the agent has responded.
+    """
+    with engine.begin() as conn:
+        # Acquire a row-level lock on the conversation so that two concurrent
+        # requests for the same conversation cannot race on MAX(turn_number).
+        conn.execute(
+            text("SELECT id FROM conversations WHERE id = :conv_id FOR UPDATE"),
+            {"conv_id": conversation_id},
+        )
+        turn_row = conn.execute(
+            text("""
+                INSERT INTO conversation_turns
+                    (conversation_id, turn_number, user_message, assistant_message, metadata)
+                VALUES (
+                    :conv_id,
+                    (SELECT COALESCE(MAX(turn_number), 0) + 1
+                     FROM conversation_turns
+                     WHERE conversation_id = :conv_id),
+                    :user_message,
+                    NULL,
+                    NULL
+                )
+                RETURNING id
+            """),
+            {"conv_id": conversation_id, "user_message": user_message},
+        ).mappings().first()
+    return str(turn_row["id"])
+
+
+def _complete_turn(
+    turn_id: str,
+    conversation_id: str,
     assistant_message: str,
     metadata: dict | None = None,
 ) -> None:
-    """Persist both user and assistant turns to chat_messages and touch conversations.updated_at."""
+    """
+    Fill in the assistant response for a previously created pending turn and
+    touch conversations.updated_at so the sidebar sorts correctly.
+    """
     with engine.begin() as conn:
         conn.execute(
             text("""
-                INSERT INTO chat_messages (conversation_id, role, content, metadata)
-                VALUES (:conv_id, 'user', :content, NULL)
-            """),
-            {"conv_id": conversation_id, "content": user_message},
-        )
-        conn.execute(
-            text("""
-                INSERT INTO chat_messages (conversation_id, role, content, metadata)
-                VALUES (:conv_id, 'assistant', :content, :metadata)
+                UPDATE conversation_turns
+                SET assistant_message = :assistant_message,
+                    metadata          = :metadata
+                WHERE id = :turn_id
             """),
             {
-                "conv_id": conversation_id,
-                "content": assistant_message,
+                "turn_id": turn_id,
+                "assistant_message": assistant_message,
                 "metadata": json.dumps(metadata) if metadata else None,
             },
         )
         conn.execute(
-            text("""
-                UPDATE conversations 
-                SET updated_at = NOW() 
-                WHERE id = :conv_id
-            """),
+            text("UPDATE conversations SET updated_at = NOW() WHERE id = :conv_id"),
             {"conv_id": conversation_id},
         )
 
@@ -725,14 +720,13 @@ def _save_chat_messages(
 @app.post("/api/v1/chat")
 def chat_with_agent(
     chat_request: AgentChatRequest,
-    background_tasks: BackgroundTasks,
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
     Send a normal user message to the bus-booking AI agent.
 
     Creates the conversation on the first message if conversation_id is omitted,
-    persists messages, and runs title generation in the background.
+    persists messages and keeps the first user message as the conversation title.
     """
     _check_agent_rate_limit(current_user)
 
@@ -740,11 +734,20 @@ def chat_with_agent(
     if not user_text:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
-    conversation_id, thread_id, is_new = _get_or_create_conversation(
+    conversation_id, thread_id = _get_or_create_conversation(
         current_user=current_user,
         conversation_id=chat_request.conversation_id,
         first_message=user_text,
     )
+
+    # Persist the user message immediately (assistant_message = NULL).
+    # The turn is completed after the agent responds. If the agent fails,
+    # the pending turn (user_message only) remains in the database.
+    turn_id: str | None = None
+    try:
+        turn_id = _create_pending_turn(conversation_id, user_text)
+    except Exception as exc:
+        print(f"[CHAT PERSISTENCE] Warning creating pending turn: {exc}")
 
     try:
         result = run_agent(
@@ -795,26 +798,17 @@ def chat_with_agent(
         response_payload["payment_order"] = payment_order_data
         msg_metadata["payment_order"] = payment_order_data
 
-    # Persist message history
-    try:
-        _save_chat_messages(
-            conversation_id=conversation_id,
-            user_message=user_text,
-            assistant_message=result["final_response"],
-            metadata=msg_metadata or None,
-        )
-    except Exception as exc:
-        print(f"[CHAT PERSISTENCE] Warning saving messages: {exc}")
-
-    # Background title generation on first message
-    if is_new:
-        fallback_title = user_text[:60].strip() or "New Booking Chat"
-        background_tasks.add_task(
-            _generate_and_update_title,
-            conversation_id=conversation_id,
-            fallback_title=fallback_title,
-            user_message=user_text,
-        )
+    # Complete the pending turn with the assistant response.
+    if turn_id is not None:
+        try:
+            _complete_turn(
+                turn_id=turn_id,
+                conversation_id=conversation_id,
+                assistant_message=result["final_response"],
+                metadata=msg_metadata or None,
+            )
+        except Exception as exc:
+            print(f"[CHAT PERSISTENCE] Warning completing turn: {exc}")
 
     return response_payload
 
@@ -856,8 +850,8 @@ def approve_agent_action(
     with engine.connect() as conn:
         row = conn.execute(
             text("""
-                SELECT id FROM conversations 
-                WHERE id = :id AND auth_user_id = :user_id
+                SELECT id FROM conversations
+                WHERE id = :id AND auth_user_id = :user_id AND deleted_at IS NULL
             """),
             {"id": str(conv_uuid), "user_id": str(current_user.id)},
         ).mappings().first()
@@ -934,21 +928,28 @@ def approve_agent_action(
         response_payload["payment_order"] = payment_order_data
         msg_metadata["payment_order"] = payment_order_data
 
-    # Persist decision turn
+    # Persist the approval decision as a conversation turn.
+    approval_turn_id: str | None = None
     try:
         decision_label = (
             "Approved the action"
             if approval_request.approval_decision == "approve"
             else "Rejected the action"
         )
-        _save_chat_messages(
-            conversation_id=conversation_id,
-            user_message=decision_label,
-            assistant_message=result["final_response"],
-            metadata=msg_metadata or None,
-        )
+        approval_turn_id = _create_pending_turn(conversation_id, decision_label)
     except Exception as exc:
-        print(f"[APPROVAL PERSISTENCE] Warning saving decision: {exc}")
+        print(f"[APPROVAL PERSISTENCE] Warning creating pending turn: {exc}")
+
+    if approval_turn_id is not None:
+        try:
+            _complete_turn(
+                turn_id=approval_turn_id,
+                conversation_id=conversation_id,
+                assistant_message=result["final_response"],
+                metadata=msg_metadata or None,
+            )
+        except Exception as exc:
+            print(f"[APPROVAL PERSISTENCE] Warning completing turn: {exc}")
 
     return response_payload
 
@@ -975,10 +976,12 @@ def list_conversations(
         "fetch_limit": limit + 1,
     }
 
-    where_clauses = ["auth_user_id = :user_id"]
+    where_clauses = ["c.auth_user_id = :user_id", "c.deleted_at IS NULL"]
 
     if search and search.strip():
-        where_clauses.append("title ILIKE :search_pattern")
+        where_clauses.append(
+            "COALESCE(first_turn.user_message, c.title) ILIKE :search_pattern"
+        )
         params["search_pattern"] = f"%{search.strip()}%"
 
     if cursor and cursor_id:
@@ -992,10 +995,21 @@ def list_conversations(
             pass
 
     query_str = f"""
-        SELECT id, title, created_at, updated_at
-        FROM conversations
+        SELECT
+            c.id,
+            COALESCE(first_turn.user_message, c.title) AS title,
+            c.created_at,
+            c.updated_at
+        FROM conversations AS c
+        LEFT JOIN LATERAL (
+            SELECT user_message
+            FROM conversation_turns
+            WHERE conversation_id = c.id AND user_message IS NOT NULL
+            ORDER BY turn_number ASC
+            LIMIT 1
+        ) AS first_turn ON TRUE
         WHERE {' AND '.join(where_clauses)}
-        ORDER BY updated_at DESC, id DESC
+        ORDER BY c.updated_at DESC, c.id DESC
         LIMIT :fetch_limit
     """
 
@@ -1062,7 +1076,7 @@ def get_conversation_details(
             text("""
                 SELECT id, title, created_at, updated_at
                 FROM conversations
-                WHERE id = :id AND auth_user_id = :user_id
+                WHERE id = :id AND auth_user_id = :user_id AND deleted_at IS NULL
             """),
             {"id": str(conv_uuid), "user_id": str(current_user.id)},
         ).mappings().first()
@@ -1070,35 +1084,49 @@ def get_conversation_details(
         if not conv_row:
             raise HTTPException(status_code=404, detail="Conversation not found.")
 
-        msg_rows = conn.execute(
+        turn_rows = conn.execute(
             text("""
-                SELECT id, role, content, metadata, created_at
-                FROM chat_messages
+                SELECT id, turn_number, user_message, assistant_message, metadata, created_at
+                FROM conversation_turns
                 WHERE conversation_id = :id
-                ORDER BY created_at ASC
+                ORDER BY turn_number ASC
             """),
             {"id": str(conv_uuid)},
         ).mappings().fetchall()
 
+    # Expand each turn into two ChatMessage items (user + assistant)
+    # preserving the existing frontend messages[] contract (Option A).
+    # assistant_message is omitted for pending turns (still NULL).
     messages = []
-    for m in msg_rows:
-        meta = m["metadata"]
-        if isinstance(meta, str):
-            try:
-                meta = json.loads(meta)
-            except Exception:
-                meta = None
+    for turn in turn_rows:
+        ts = (
+            turn["created_at"].isoformat()
+            if isinstance(turn["created_at"], datetime)
+            else str(turn["created_at"])
+        )
+        # User message (always present)
         messages.append({
-            "id": str(m["id"]),
-            "role": m["role"],
-            "content": m["content"],
-            "metadata": meta,
-            "created_at": (
-                m["created_at"].isoformat()
-                if isinstance(m["created_at"], datetime)
-                else str(m["created_at"])
-            ),
+            "id": f"{turn['id']}-user",
+            "role": "user",
+            "content": turn["user_message"],
+            "metadata": None,
+            "created_at": ts,
         })
+        # Assistant message (omit if still pending / agent failed)
+        if turn["assistant_message"] is not None:
+            meta = turn["metadata"]
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = None
+            messages.append({
+                "id": f"{turn['id']}-assistant",
+                "role": "assistant",
+                "content": turn["assistant_message"],
+                "metadata": meta,
+                "created_at": ts,
+            })
 
     # Read LangGraph state for authoritative interrupts and booking context
     thread_id = f"{current_user.id}:{conversation_id}"
@@ -1228,7 +1256,7 @@ def rename_conversation(
             text("""
                 UPDATE conversations
                 SET title = :title, updated_at = NOW()
-                WHERE id = :id AND auth_user_id = :user_id
+                WHERE id = :id AND auth_user_id = :user_id AND deleted_at IS NULL
             """),
             {"id": str(conv_uuid), "title": new_title, "user_id": str(current_user.id)},
         )
@@ -1258,18 +1286,15 @@ def delete_conversation(
 
     thread_id = f"{current_user.id}:{conversation_id}"
 
-    # Clean up LangGraph checkpointer
-    try:
-        checkpointer.delete_thread(thread_id)
-    except Exception as exc:
-        print(f"[CONVERSATION DELETE] Warning cleaning up checkpoints: {exc}")
-
-    # Delete database record (cascades chat_messages)
+    # Soft-delete the database record FIRST.
+    # LangGraph checkpoint cleanup happens AFTER the DB write succeeds,
+    # so a database failure cannot destroy checkpoint state prematurely.
     with engine.begin() as conn:
         result = conn.execute(
             text("""
-                DELETE FROM conversations
-                WHERE id = :id AND auth_user_id = :user_id
+                UPDATE conversations
+                SET deleted_at = NOW()
+                WHERE id = :id AND auth_user_id = :user_id AND deleted_at IS NULL
             """),
             {"id": str(conv_uuid), "user_id": str(current_user.id)},
         )

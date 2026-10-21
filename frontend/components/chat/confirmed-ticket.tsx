@@ -1,13 +1,42 @@
 "use client";
 
 import React, { useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Bus, Check, CheckCircle2, Copy, Printer } from "lucide-react";
 import type { ConfirmedTicketData } from "@/types/bus-booking";
 
 interface ConfirmedTicketProps {
   ticket: ConfirmedTicketData;
   onBookAnother?: () => void;
+}
+
+function Field({
+  label,
+  children,
+  sub,
+  className = "",
+}: {
+  label: string;
+  children: React.ReactNode;
+  sub?: string | null;
+  className?: string;
+}) {
+  return (
+    <div className={`min-w-0 ${className}`}>
+      <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
+      <div className="mt-1 truncate text-sm font-semibold text-foreground">
+        {children}
+      </div>
+      {sub && (
+        <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+          {sub}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function ConfirmedTicket({ ticket, onBookAnother }: ConfirmedTicketProps) {
@@ -28,147 +57,126 @@ export function ConfirmedTicket({ ticket, onBookAnother }: ConfirmedTicketProps)
   };
 
   return (
-    <Card className="border-emerald-300 dark:border-emerald-800 bg-gradient-to-b from-emerald-50/70 via-background to-background dark:from-emerald-950/20 dark:via-background dark:to-background shadow-md overflow-hidden mt-4 mb-2 print:border-none print:shadow-none">
-      {/* Header Banner */}
-      <CardHeader className="bg-emerald-600 text-white px-5 py-3.5 flex flex-row items-center justify-between">
-        <div>
-          <CardTitle className="text-base font-bold text-white tracking-wide">
-            Booking Confirmed
-          </CardTitle>
-          <p className="text-xs text-emerald-100">
-            Your ticket has been confirmed and seat reserved.
-          </p>
+    <Card className="mt-4 mb-2 gap-0 overflow-hidden border-emerald-300 bg-gradient-to-b from-emerald-50/70 via-background to-background py-0 shadow-md dark:border-emerald-800 dark:from-emerald-950/20 dark:via-background dark:to-background print:border-none print:shadow-none">
+      {/* Header banner */}
+      <div className="flex items-center justify-between gap-3 bg-emerald-600 px-5 py-3.5 text-white">
+        <div className="flex min-w-0 items-center gap-3">
+          <CheckCircle2 className="size-6 shrink-0" />
+          <div className="min-w-0">
+            <div className="text-base font-bold leading-tight tracking-wide">
+              Booking Confirmed
+            </div>
+            <p className="truncate text-xs text-emerald-100">
+              Your ticket has been confirmed and seat reserved.
+            </p>
+          </div>
         </div>
-        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-800 text-emerald-100">
+        <span className="shrink-0 rounded-full bg-emerald-800 px-2.5 py-0.5 text-xs font-semibold uppercase text-emerald-100">
           {ticket.status}
         </span>
-      </CardHeader>
+      </div>
 
-      <CardContent className="p-5 space-y-5">
-        {/* Reference & Actions Bar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-muted/40 rounded-lg border">
-          <div>
-            <div className="text-xs text-muted-foreground uppercase font-medium tracking-wider">
+      <CardContent className="space-y-5 p-5">
+        {/* Reference + actions */}
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/40 px-4 py-3">
+          <div className="min-w-0">
+            <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
               Booking Reference
             </div>
-            <div className="font-mono text-base font-bold text-foreground">
+            <div className="mt-0.5 font-mono text-base font-bold text-foreground">
               {ticket.booking_reference}
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 print:hidden">
             <Button
               type="button"
               variant="outline"
-              size="xs"
+              size="sm"
               onClick={handleCopy}
-              className="text-xs h-8"
+              className="h-8 gap-1.5 text-xs"
             >
+              {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
               {copied ? "Copied" : "Copy Ref"}
             </Button>
             <Button
               type="button"
               variant="outline"
-              size="xs"
+              size="sm"
               onClick={handlePrint}
-              className="text-xs h-8 print:hidden"
+              className="h-8 gap-1.5 text-xs"
             >
+              <Printer className="size-3.5" />
               Print
             </Button>
           </div>
         </div>
 
-        {/* Route Header */}
-        {(ticket.origin || ticket.destination) && (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-center py-2 border-b">
-            <div>
-              <div className="text-xs text-muted-foreground">From</div>
-              <div className="font-semibold text-base">{ticket.origin || "—"}</div>
-              {ticket.boarding_point && (
-                <div className="text-xs text-muted-foreground mt-0.5">
-                  Boarding: {ticket.boarding_point}
-                </div>
-              )}
+        {/* Route: From — line — To */}
+        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 sm:gap-4">
+          <div className="min-w-0">
+            <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              From
             </div>
-            <div className="text-center hidden sm:block">
-              <div className="text-[11px] text-muted-foreground">Direct Service</div>
+            <div className="mt-1 truncate text-lg font-bold leading-tight">
+              {ticket.origin || "—"}
             </div>
-            <div className="sm:text-right">
-              <div className="text-xs text-muted-foreground">To</div>
-              <div className="font-semibold text-base">{ticket.destination || "—"}</div>
-              {ticket.dropping_point && (
-                <div className="text-xs text-muted-foreground mt-0.5">
-                  Dropping: {ticket.dropping_point}
-                </div>
-              )}
+            <div className="mt-0.5 truncate text-xs text-muted-foreground">
+              {ticket.boarding_point ? `Boarding: ${ticket.boarding_point}` : "\u00A0"}
             </div>
           </div>
-        )}
 
-        {/* Details Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
-          {ticket.travel_date && (
-            <div>
-              <span className="text-muted-foreground block mb-1">Travel Date</span>
-              <p className="font-semibold text-sm">{ticket.travel_date}</p>
+          <div className="flex w-16 flex-col items-center gap-1 sm:w-28">
+            <div className="flex w-full items-center">
+              <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
+              <span className="h-px flex-1 border-t border-dashed border-muted-foreground/50" />
+              <Bus className="mx-1 size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+              <span className="h-px flex-1 border-t border-dashed border-muted-foreground/50" />
+              <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
             </div>
-          )}
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              Direct
+            </span>
+          </div>
 
-          {ticket.seat_number && (
-            <div>
-              <span className="text-muted-foreground block mb-1">Seat No.</span>
-              <p className="font-semibold text-sm text-emerald-600 dark:text-emerald-400">
-                {ticket.seat_number}
-              </p>
+          <div className="min-w-0 text-right">
+            <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              To
             </div>
-          )}
-
-          {ticket.operator_name && (
-            <div>
-              <span className="text-muted-foreground block mb-1">Operator</span>
-              <p className="font-semibold text-sm">{ticket.operator_name}</p>
-              {ticket.bus_type && (
-                <p className="text-[11px] text-muted-foreground">{ticket.bus_type}</p>
-              )}
+            <div className="mt-1 truncate text-lg font-bold leading-tight">
+              {ticket.destination || "—"}
             </div>
-          )}
-
-          {ticket.total_amount && (
-            <div>
-              <span className="text-muted-foreground mb-1 block">Total Amount Paid</span>
-              <p className="font-bold text-base text-foreground">
-                ₹{ticket.total_amount}
-              </p>
+            <div className="mt-0.5 truncate text-xs text-muted-foreground">
+              {ticket.dropping_point ? `Dropping: ${ticket.dropping_point}` : "\u00A0"}
             </div>
-          )}
+          </div>
         </div>
 
-        {/* Passenger Info */}
-        {(ticket.passenger_name || ticket.passenger_age || ticket.passenger_gender) && (
-          <div className="p-3 rounded-lg bg-muted/30 border text-xs">
-            <span className="text-muted-foreground font-medium block mb-1.5">
-              Passenger Information
+        {/* Trip + passenger share one 4-column grid so columns line up */}
+        <div className="grid grid-cols-2 gap-x-4 gap-y-5 border-t border-dashed pt-5 sm:grid-cols-4">
+          <Field label="Travel Date">{ticket.travel_date || "—"}</Field>
+          <Field label="Seat No.">
+            <span className="text-emerald-600 dark:text-emerald-400">
+              {ticket.seat_number || "—"}
             </span>
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-              {ticket.passenger_name && (
-                <span className="font-semibold text-foreground">
-                  {ticket.passenger_name}
-                </span>
-              )}
-              {ticket.passenger_age && (
-                <span className="text-muted-foreground">Age: {ticket.passenger_age}</span>
-              )}
-              {ticket.passenger_gender && (
-                <span className="text-muted-foreground">
-                  Gender: {ticket.passenger_gender}
-                </span>
-              )}
-            </div>
-          </div>
-        )}
+          </Field>
+          <Field label="Operator" sub={ticket.bus_type}>
+            {ticket.operator_name || "—"}
+          </Field>
+          <Field label="Amount Paid">
+            <span className="text-base font-bold">
+              {ticket.total_amount ? `₹${ticket.total_amount}` : "—"}
+            </span>
+          </Field>
 
-        {/* Footer Actions */}
+          <Field label="Passenger" className="col-span-2">
+            {ticket.passenger_name || "—"}
+          </Field>
+          <Field label="Age">{ticket.passenger_age || "—"}</Field>
+          <Field label="Gender">{ticket.passenger_gender || "—"}</Field>
+        </div>
+
         {onBookAnother && (
-          <div className="pt-2 flex justify-end print:hidden">
+          <div className="flex justify-end border-t pt-4 print:hidden">
             <Button
               type="button"
               variant="outline"

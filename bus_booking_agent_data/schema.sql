@@ -341,3 +341,40 @@ CREATE INDEX idx_seat_holds_schedule_segment
 
 CREATE INDEX idx_seat_holds_booking
     ON seat_holds(booking_id);
+
+
+-- =============================================================================
+-- 11. CONVERSATIONS (Soft-deletable chat sessions)
+-- =============================================================================
+create table if not exists conversations (
+    id           uuid primary key default gen_random_uuid(),
+    auth_user_id uuid not null,
+    title        text not null,
+    created_at   timestamptz not null default now(),
+    updated_at   timestamptz not null default now(),
+    deleted_at   timestamptz
+);
+
+create index if not exists idx_conversations_user_active
+    on conversations (auth_user_id, updated_at desc, id desc)
+    where deleted_at is null;
+
+
+-- =============================================================================
+-- 12. CONVERSATION_TURNS (One row per user + assistant interaction turn)
+-- =============================================================================
+create table if not exists conversation_turns (
+    id                uuid primary key default gen_random_uuid(),
+    conversation_id   uuid not null references conversations(id) on delete cascade,
+    turn_number       integer not null,
+    user_message      text,
+    assistant_message text,
+    metadata          jsonb,
+    created_at        timestamptz not null default now(),
+    constraint conversation_turns_unique_turn unique (conversation_id, turn_number),
+    constraint conversation_turns_not_empty check (user_message is not null or assistant_message is not null)
+);
+
+create index if not exists idx_conversation_turns_conv_turn
+    on conversation_turns (conversation_id, turn_number asc);
+

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
@@ -23,7 +23,6 @@ import {
   EmptyHeader,
   EmptyTitle,
 } from "@/components/ui/empty";
-import { Button } from "@/components/ui/button";
 import {
   Tooltip,
   TooltipContent,
@@ -39,8 +38,9 @@ import type { ConversationListItem } from "@/types/bus-booking";
 export interface NavHistoryProps {
   conversations: ConversationListItem[];
   isLoading: boolean;
+  error: string | null;
   hasMore: boolean;
-  onLoadMore: () => void;
+  onLoadMore: () => Promise<void>;
   onRename?: (id: string, newTitle: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 }
@@ -55,6 +55,7 @@ interface GroupedConversations {
 export function NavHistory({
   conversations,
   isLoading,
+  error,
   hasMore,
   onLoadMore,
   onDelete,
@@ -62,6 +63,36 @@ export function NavHistory({
   const params = useParams();
   const router = useRouter();
   const activeConversationId = params?.conversationId as string | undefined;
+  const historyScrollRef = useRef<HTMLDivElement>(null);
+  const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
+  const isLoadingMoreRef = useRef(false);
+
+  const loadMore = useCallback(async () => {
+    if (isLoading || !hasMore || isLoadingMoreRef.current) return;
+
+    isLoadingMoreRef.current = true;
+    try {
+      await onLoadMore();
+    } finally {
+      isLoadingMoreRef.current = false;
+    }
+  }, [hasMore, isLoading, onLoadMore]);
+
+  useEffect(() => {
+    const root = historyScrollRef.current;
+    const sentinel = loadMoreSentinelRef.current;
+    if (!root || !sentinel || !hasMore || error) return;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) void loadMore();
+      },
+      { root, rootMargin: "120px 0px", threshold: 0 },
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [error, hasMore, loadMore]);
 
   // Group conversations by relative date using vanilla Date calculations
   const groups = useMemo<GroupedConversations>(() => {
@@ -129,6 +160,8 @@ export function NavHistory({
                             ? "h-10 bg-sidebar-accent text-sidebar-accent-foreground font-medium"
                             : "h-10"
                         }
+                        title={item.title}
+                        aria-label={item.title}
                         render={<Link href={`/chat/${item.id}`} />}
                       >
                         <span className="truncate text-sm">{item.title}</span>
@@ -176,15 +209,27 @@ export function NavHistory({
   };
 
   return (
-    <SidebarGroup className="group-data-[collapsible=icon]:hidden px-2 space-y-2">
+    <SidebarGroup className="group-data-[collapsible=icon]:hidden min-h-0 flex-1 px-2 space-y-2">
       <div className="flex items-center justify-between px-2 pt-1">
         <SidebarGroupLabel className="p-0 text-xs font-semibold text-muted-foreground">
           Recent Chats
         </SidebarGroupLabel>
       </div>
 
-      <div className="space-y-2 overflow-y-auto max-h-[calc(100vh-11rem)] pr-1">
-        {conversations.length === 0 && !isLoading ? (
+      <div
+        ref={historyScrollRef}
+        className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain scroll-smooth pr-1"
+      >
+        {conversations.length === 0 && isLoading ? (
+          <div className="flex items-center justify-center py-6 text-xs text-muted-foreground gap-2">
+            <Loader2 className="size-4 animate-spin" />
+            Loading conversations
+          </div>
+        ) : conversations.length === 0 && error ? (
+          <div role="alert" className="px-2 py-4 text-center text-xs text-destructive">
+            {error}
+          </div>
+        ) : conversations.length === 0 ? (
           <Empty className="gap-2 border border-dashed p-4 my-2">
             <EmptyHeader>
               <EmptyTitle className="text-xs font-medium">No history yet</EmptyTitle>
@@ -200,32 +245,26 @@ export function NavHistory({
             {renderSection("Previous 7 Days", groups.previous7Days)}
             {renderSection("Older", groups.older)}
 
-            {/* Load More Button at bottom */}
+            {error && (
+              <div role="alert" className="px-2 py-2 text-xs text-destructive">
+                {error}
+              </div>
+            )}
+
             {hasMore && (
-              <div className="pt-2 pb-1 text-center">
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  onClick={onLoadMore}
-                  disabled={isLoading}
-                  className="w-full text-xs text-muted-foreground hover:text-foreground"
-                >
-                  {isLoading ? (
-                    <Loader2 className="size-3.5 animate-spin mr-1" />
-                  ) : null}
-                  Load older chats
-                </Button>
+              <div
+                ref={loadMoreSentinelRef}
+                aria-hidden="true"
+                className="flex min-h-8 items-center justify-center py-2"
+              >
+                {isLoading && (
+                  <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                )}
               </div>
             )}
           </>
         )}
 
-        {isLoading && conversations.length === 0 && (
-          <div className="flex items-center justify-center py-6 text-xs text-muted-foreground gap-2">
-            <Loader2 className="size-4 animate-spin" />
-            Loading conversations
-          </div>
-        )}
       </div>
     </SidebarGroup>
   );

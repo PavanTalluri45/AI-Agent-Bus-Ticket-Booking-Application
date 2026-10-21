@@ -11,6 +11,7 @@ import type { ConversationListItem } from "@/types/bus-booking";
 export interface UseConversationsReturn {
   conversations: ConversationListItem[];
   isLoading: boolean;
+  error: string | null;
   searchQuery: string;
   hasMore: boolean;
   setSearchQuery: (query: string) => void;
@@ -22,7 +23,10 @@ export interface UseConversationsReturn {
 
 export function useConversations(): UseConversationsReturn {
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  // The initial fetch starts after the first render, so begin in a loading
+  // state to avoid treating the initial empty array as an empty history.
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [nextCursorId, setNextCursorId] = useState<string | null>(null);
@@ -39,6 +43,7 @@ export function useConversations(): UseConversationsReturn {
       isInitial: boolean = false,
     ) => {
       setIsLoading(true);
+      setError(null);
       try {
         const res = await listConversations({
           cursor,
@@ -48,6 +53,7 @@ export function useConversations(): UseConversationsReturn {
         });
 
         if (res.success) {
+          setError(null);
           setConversations((prev) => {
             if (isInitial) {
               return res.conversations;
@@ -63,9 +69,12 @@ export function useConversations(): UseConversationsReturn {
           setNextCursor(res.next_cursor);
           setNextCursorId(res.next_cursor_id);
           setHasMore(res.has_more);
+        } else {
+          setError("Couldn't load conversation history. Please try again.");
         }
       } catch (err) {
         console.error("Failed to load conversations:", err);
+        setError("Couldn't load conversation history. Please try again.");
       } finally {
         setIsLoading(false);
       }
@@ -81,13 +90,19 @@ export function useConversations(): UseConversationsReturn {
       try {
         const res = await listConversations({ limit: 20 });
         if (!ignore && res.success) {
+          setError(null);
           setConversations(res.conversations);
           setNextCursor(res.next_cursor);
           setNextCursorId(res.next_cursor_id);
           setHasMore(res.has_more);
+        } else if (!ignore) {
+          setError("Couldn't load conversation history. Please try again.");
         }
       } catch (err) {
         console.error("Failed to load conversations:", err);
+        if (!ignore) {
+          setError("Couldn't load conversation history. Please try again.");
+        }
       } finally {
         if (!ignore) {
           setIsLoading(false);
@@ -159,6 +174,7 @@ export function useConversations(): UseConversationsReturn {
   return {
     conversations,
     isLoading,
+    error,
     searchQuery,
     hasMore,
     setSearchQuery: handleSetSearchQuery,

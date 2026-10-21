@@ -307,10 +307,6 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
         window.history.replaceState({}, "", `/chat/${data.conversation_id}`);
         // Refresh sidebar immediately
         refresh();
-        // Refresh again after Gemini title generates in background
-        setTimeout(() => {
-          refresh();
-        }, 3500);
       }
 
       const assistantMessage: ChatMessage = {
@@ -460,7 +456,7 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
 
   if (isInitialLoading) {
     return (
-      <div className="flex flex-col items-center justify-center h-[calc(100vh-7.5rem)] max-w-4xl mx-auto w-full gap-3 text-muted-foreground text-sm">
+      <div className="flex h-full min-h-0 flex-col items-center justify-center max-w-4xl mx-auto w-full gap-3 text-muted-foreground text-sm">
         <Loader2 className="size-6 animate-spin text-primary" />
         <span>Loading conversation</span>
       </div>
@@ -468,10 +464,10 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
   }
 
   return (
-    <div className="flex flex-col h-[calc(100vh-7.5rem)] max-w-4xl mx-auto w-full">
+    <div className="flex h-full min-h-0 flex-col max-w-4xl mx-auto w-full">
       {/* Empty (initial) state */}
       {messages.length === 0 ? (
-        <Empty>
+        <Empty className="min-h-0">
           <EmptyHeader>
             <EmptyTitle className="text-[36px] leading-[40px] bg-gradient-to-r from-[rgb(81,175,230)] via-[rgb(53,95,242)] to-[rgb(17,40,122)] bg-clip-text text-transparent">
               Hi, {displayName}
@@ -508,7 +504,7 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
           </EmptyContent>
         </Empty>
       ) : (
-        <div className="flex-1 overflow-y-auto py-4 space-y-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain scroll-smooth py-4 space-y-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {messages.map((msg) => {
             const isUser = msg.role === "user";
             return (
@@ -643,7 +639,7 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
       )}
 
       {/* Input Form Bar */}
-      <div className="pt-2 sm:pt-3 pb-1 sm:pb-2">
+      <div className="shrink-0 pt-2 sm:pt-3 pb-1 sm:pb-2">
         <form ref={formRef} onSubmit={handleSendMessage}>
           <InputGroup>
             <InputGroupTextarea
