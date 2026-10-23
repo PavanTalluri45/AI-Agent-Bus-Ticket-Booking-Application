@@ -15,6 +15,7 @@ import { openRazorpayCheckout } from "@/lib/razorpay";
 import { ApprovalCard } from "./approval-card";
 import { PaymentCard } from "./payment-card";
 import { ConfirmedTicket } from "./confirmed-ticket";
+import { AgentSteps } from "./agent-steps";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -34,14 +35,24 @@ import {
   ArrowUp,
   Loader2,
   AlertCircle,
-  Sparkles,
 } from "lucide-react";
 import type {
+  AgentStep,
   ChatMessage,
   BookingSummary,
   PaymentOrderSummary,
   ConfirmedTicketData,
 } from "@/types/bus-booking";
+
+// Insert a streamed step, or replace the earlier event with the same ID.
+function upsertStep(steps: AgentStep[], step: AgentStep) {
+  const index = steps.findIndex((s) => s.id === step.id);
+  if (index === -1) {
+    steps.push(step);
+  } else {
+    steps[index] = step;
+  }
+}
 
 export interface BusBookingChatProps {
   conversationId?: string;
@@ -65,6 +76,7 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [liveSteps, setLiveSteps] = useState<AgentStep[]>([]);
 
   // HITL Approval State
   const [approvalRequired, setApprovalRequired] = useState(false);
@@ -116,6 +128,7 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
               approvalRequired: m.metadata?.approval_required,
               booking: m.metadata?.booking,
               paymentOrder: m.metadata?.payment_order,
+              steps: m.metadata?.steps,
             };
           });
 
@@ -172,6 +185,7 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
     scrollToBottom();
   }, [
     messages,
+    liveSteps,
     approvalRequired,
     paymentOrder,
     confirmedTicket,
@@ -268,6 +282,19 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
     }
   };
 
+  // Collects the steps streamed during one request and shows them live.
+  const startStepCollector = () => {
+    const collected: AgentStep[] = [];
+    setLiveSteps([]);
+
+    const onStep = (step: AgentStep) => {
+      upsertStep(collected, step);
+      setLiveSteps([...collected]);
+    };
+
+    return { collected, onStep };
+  };
+
   // 1. Send normal user chat message
   const handleSendMessage = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -299,7 +326,12 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
     setIsLoading(true);
 
     try {
-      const data = await sendChatMessage(text, conversationId || undefined);
+      const { collected, onStep } = startStepCollector();
+      const data = await sendChatMessage(
+        text,
+        conversationId || undefined,
+        onStep,
+      );
 
       // Seamlessly update URL on message 1 without unmounting component!
       if (!conversationId && data.conversation_id) {
@@ -320,9 +352,11 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
         approvalRequired: data.approval_required,
         booking: data.booking,
         paymentOrder: data.payment_order,
+        steps: collected.length > 0 ? collected : undefined,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
+      setLiveSteps([]);
 
       if (data.approval_required) {
         setApprovalRequired(true);
@@ -346,6 +380,7 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
         error?.message || "Failed to communicate with the bus agent.",
       );
     } finally {
+      setLiveSteps([]);
       setIsLoading(false);
     }
   };
@@ -361,7 +396,12 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
     setErrorMessage(null);
 
     try {
-      const data = await sendApprovalDecision("approve", conversationId);
+      const { collected, onStep } = startStepCollector();
+      const data = await sendApprovalDecision(
+        "approve",
+        conversationId,
+        onStep,
+      );
 
       setApprovalRequired(false);
       setPendingPrompt(null);
@@ -376,9 +416,11 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
         }),
         booking: data.booking,
         paymentOrder: data.payment_order,
+        steps: collected.length > 0 ? collected : undefined,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
+      setLiveSteps([]);
 
       if (data.booking) {
         setActiveBooking(data.booking);
@@ -392,6 +434,7 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
       const error = err as Error;
       setErrorMessage(error?.message || "Approval submission failed.");
     } finally {
+      setLiveSteps([]);
       setIsLoading(false);
     }
   };
@@ -407,7 +450,12 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
     setErrorMessage(null);
 
     try {
-      const data = await sendApprovalDecision("reject", conversationId);
+      const { collected, onStep } = startStepCollector();
+      const data = await sendApprovalDecision(
+        "reject",
+        conversationId,
+        onStep,
+      );
 
       setApprovalRequired(false);
       setPendingPrompt(null);
@@ -420,13 +468,16 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
           hour: "2-digit",
           minute: "2-digit",
         }),
+        steps: collected.length > 0 ? collected : undefined,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
+      setLiveSteps([]);
     } catch (err: unknown) {
       const error = err as Error;
       setErrorMessage(error?.message || "Rejection submission failed.");
     } finally {
+      setLiveSteps([]);
       setIsLoading(false);
     }
   };
@@ -540,6 +591,11 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
                     isUser ? "items-end" : "items-start"
                   }`}
                 >
+                  {!isUser && msg.steps && msg.steps.length > 0 && (
+                    <div className="mb-1.5 min-w-0 max-w-full">
+                      <AgentSteps steps={msg.steps} />
+                    </div>
+                  )}
                   <div
                     className={`text-sm whitespace-pre-wrap leading-relaxed ${
                       isUser
@@ -601,7 +657,22 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
           )}
 
           {/* Assistant Typing Indicator */}
-          {isLoading && (
+          {isLoading && liveSteps.length > 0 && (
+            <div className="flex items-start gap-2.5 sm:gap-3">
+              <Image
+                src="/ai-agent.webp"
+                alt="AI agent"
+                width={32}
+                height={32}
+                className="mt-0.5 size-7 shrink-0 rounded-full sm:size-8"
+              />
+              <div className="min-w-0 max-w-[85%] py-1.5 sm:max-w-[78%]">
+                <AgentSteps steps={liveSteps} streaming />
+              </div>
+            </div>
+          )}
+
+          {isLoading && liveSteps.length === 0 && (
             <div className="flex items-center gap-2.5 text-xs text-muted-foreground pl-1">
               <Image
                 src="/ai-agent.webp"
@@ -610,10 +681,6 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
                 height={28}
                 className="size-7 shrink-0 animate-pulse rounded-full"
               />
-              <div className="flex items-center gap-1.5 bg-muted/50 border px-3 py-1.5 rounded-full">
-                <Sparkles className="w-3.5 h-3.5 text-emerald-600 animate-spin" />
-                <span>Agent is thinking</span>
-              </div>
             </div>
           )}
 

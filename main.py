@@ -1,10 +1,14 @@
 import json
+import queue
+import threading
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Callable, Literal
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from bus_booking_ai_agent.config.database import engine
@@ -14,6 +18,11 @@ from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
     checkpointer,
     graph,
     run_agent,
+)
+
+from bus_booking_ai_agent.phase_04_langgraph.step_events import (
+    reset_step_emitter,
+    set_step_emitter,
 )
 
 from bus_booking_ai_agent.phase_05_memory.memory_service import (
@@ -638,6 +647,12 @@ def _get_or_create_conversation(
             {"user_id": str(current_user.id), "title": title},
         ).mappings().first()
 
+    if new_row is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create conversation.",
+        )
+
     new_conv_id = str(new_row["id"])
     thread_id = f"{current_user.id}:{new_conv_id}"
     return new_conv_id, thread_id
@@ -679,6 +694,10 @@ def _create_pending_turn(
             """),
             {"conv_id": conversation_id, "user_message": user_message},
         ).mappings().first()
+
+    if turn_row is None:
+        raise RuntimeError("Failed to create conversation turn.")
+
     return str(turn_row["id"])
 
 
@@ -713,66 +732,26 @@ def _complete_turn(
 
 
 # ============================================================
-# Agent Chat: Normal Message
+# Agent Chat: Streaming helpers
 # ============================================================
 
 
-@app.post("/api/v1/chat")
-def chat_with_agent(
-    chat_request: AgentChatRequest,
-    current_user: AuthenticatedUser = Depends(get_current_user),
-):
+def _build_agent_payload(
+    result: dict[str, Any],
+    conversation_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """
-    Send a normal user message to the bus-booking AI agent.
-
-    Creates the conversation on the first message if conversation_id is omitted,
-    persists messages and keeps the first user message as the conversation title.
+    Turn a run_agent() result into the API payload sent to the browser and
+    the metadata persisted with the assistant message.
     """
-    _check_agent_rate_limit(current_user)
 
-    user_text = chat_request.message.strip()
-    if not user_text:
-        raise HTTPException(status_code=400, detail="Message cannot be empty.")
-
-    conversation_id, thread_id = _get_or_create_conversation(
-        current_user=current_user,
-        conversation_id=chat_request.conversation_id,
-        first_message=user_text,
-    )
-
-    # Persist the user message immediately (assistant_message = NULL).
-    # The turn is completed after the agent responds. If the agent fails,
-    # the pending turn (user_message only) remains in the database.
-    turn_id: str | None = None
-    try:
-        turn_id = _create_pending_turn(conversation_id, user_text)
-    except Exception as exc:
-        print(f"[CHAT PERSISTENCE] Warning creating pending turn: {exc}")
-
-    try:
-        result = run_agent(
-            current_user=current_user,
-            user_message=user_text,
-            thread_id=thread_id,
-        )
-    except PermissionError as exc:
-        raise HTTPException(
-            status_code=403,
-            detail=str(exc),
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        )
-
-    response_payload = {
+    response_payload: dict[str, Any] = {
         "success": True,
         "conversation_id": conversation_id,
         "response": result["final_response"],
     }
 
-    msg_metadata: dict = {}
+    msg_metadata: dict[str, Any] = {}
     if result.get("__interrupt__"):
         response_payload["approval_required"] = True
         msg_metadata["approval_required"] = True
@@ -798,19 +777,150 @@ def chat_with_agent(
         response_payload["payment_order"] = payment_order_data
         msg_metadata["payment_order"] = payment_order_data
 
-    # Complete the pending turn with the assistant response.
-    if turn_id is not None:
-        try:
-            _complete_turn(
-                turn_id=turn_id,
-                conversation_id=conversation_id,
-                assistant_message=result["final_response"],
-                metadata=msg_metadata or None,
-            )
-        except Exception as exc:
-            print(f"[CHAT PERSISTENCE] Warning completing turn: {exc}")
+    return response_payload, msg_metadata
 
-    return response_payload
+
+def _stream_agent_turn(
+    run_turn: Callable[[], dict[str, Any]],
+    finalize_turn: Callable[[dict[str, Any], list[dict[str, Any]]], dict[str, Any]],
+) -> StreamingResponse:
+    """
+    Run one agent turn in a worker thread and stream it as Server-Sent Events.
+
+    Events:
+        step  - one agent step (running / done / error), may repeat per step ID
+        final - the same payload the old JSON endpoint returned
+        error - {"status": int, "detail": str}; always the last event
+
+    The worker thread also persists the turn (finalize_turn), so the
+    conversation is saved even if the browser disconnects mid-stream.
+    """
+
+    events: queue.Queue = queue.Queue()
+    steps_by_id: dict[str, dict[str, Any]] = {}
+
+    def on_step(step: dict[str, Any]) -> None:
+        steps_by_id[step["id"]] = step
+        events.put(("step", step))
+
+    def worker() -> None:
+        token = set_step_emitter(on_step)
+        try:
+            result = run_turn()
+            payload = finalize_turn(result, list(steps_by_id.values()))
+            events.put(("final", payload))
+        except PermissionError as exc:
+            events.put(("error", {"status": 403, "detail": str(exc)}))
+        except ValueError as exc:
+            events.put(("error", {"status": 400, "detail": str(exc)}))
+        except Exception as exc:
+            print(f"[CHAT STREAM] Unexpected agent error: {exc!r}")
+            events.put((
+                "error",
+                {
+                    "status": 500,
+                    "detail": "The agent failed to process your request.",
+                },
+            ))
+        finally:
+            reset_step_emitter(token)
+            events.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def event_stream():
+        while True:
+            item = events.get()
+            if item is None:
+                break
+            name, data = item
+            yield f"event: {name}\ndata: {json.dumps(data, default=str)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ============================================================
+# Agent Chat: Normal Message
+# ============================================================
+
+
+@app.post("/api/v1/chat")
+def chat_with_agent(
+    chat_request: AgentChatRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Send a normal user message to the bus-booking AI agent.
+
+    Creates the conversation on the first message if conversation_id is omitted,
+    persists messages and keeps the first user message as the conversation title.
+
+    Responds with a Server-Sent Events stream of agent steps followed by a
+    final event carrying the chat payload.
+    """
+    _check_agent_rate_limit(current_user)
+
+    user_text = chat_request.message.strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    conversation_id, thread_id = _get_or_create_conversation(
+        current_user=current_user,
+        conversation_id=chat_request.conversation_id,
+        first_message=user_text,
+    )
+
+    # Persist the user message immediately (assistant_message = NULL).
+    # The turn is completed after the agent responds. If the agent fails,
+    # the pending turn (user_message only) remains in the database.
+    turn_id: str | None = None
+    try:
+        turn_id = _create_pending_turn(conversation_id, user_text)
+    except Exception as exc:
+        print(f"[CHAT PERSISTENCE] Warning creating pending turn: {exc}")
+
+    def run_turn() -> dict[str, Any]:
+        return run_agent(
+            current_user=current_user,
+            user_message=user_text,
+            thread_id=thread_id,
+        )
+
+    def finalize_turn(
+        result: dict[str, Any],
+        steps: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        response_payload, msg_metadata = _build_agent_payload(
+            result,
+            conversation_id,
+        )
+
+        if steps:
+            msg_metadata["steps"] = steps
+
+        # Complete the pending turn with the assistant response.
+        if turn_id is not None:
+            try:
+                _complete_turn(
+                    turn_id=turn_id,
+                    conversation_id=conversation_id,
+                    assistant_message=result["final_response"],
+                    metadata=msg_metadata or None,
+                )
+            except Exception as exc:
+                print(f"[CHAT PERSISTENCE] Warning completing turn: {exc}")
+
+        return response_payload
+
+    return _stream_agent_turn(run_turn, finalize_turn)
 
 
 # ============================================================
@@ -828,6 +938,7 @@ def approve_agent_action(
     Approve or reject a pending human-in-the-loop agent action.
 
     Resumes the existing LangGraph thread and persists the approval turn.
+    Streams agent steps the same way as /api/v1/chat.
     """
     _check_agent_rate_limit(current_user)
 
@@ -878,80 +989,52 @@ def approve_agent_action(
                 detail="Conversation not found or access denied.",
             )
 
-    try:
-        result = run_agent(
+    def run_turn() -> dict[str, Any]:
+        return run_agent(
             current_user=current_user,
             user_message=approval_request.approval_decision,
             thread_id=thread_id,
             approval_decision=approval_request.approval_decision,
         )
-    except PermissionError as exc:
-        raise HTTPException(
-            status_code=403,
-            detail=str(exc),
+
+    def finalize_turn(
+        result: dict[str, Any],
+        steps: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        response_payload, msg_metadata = _build_agent_payload(
+            result,
+            conversation_id,
         )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        )
 
-    response_payload = {
-        "success": True,
-        "conversation_id": conversation_id,
-        "response": result["final_response"],
-    }
+        if steps:
+            msg_metadata["steps"] = steps
 
-    msg_metadata: dict = {}
-    if result.get("__interrupt__"):
-        response_payload["approval_required"] = True
-        msg_metadata["approval_required"] = True
-
-    booking_ctx = result.get("booking_context", {})
-    if booking_ctx.get("booking_id"):
-        booking_data = {
-            "booking_id": booking_ctx.get("booking_id"),
-            "booking_reference": booking_ctx.get("booking_reference"),
-            "status": booking_ctx.get("booking_status"),
-            "total_amount": booking_ctx.get("total_amount"),
-        }
-        response_payload["booking"] = booking_data
-        msg_metadata["booking"] = booking_data
-
-    if booking_ctx.get("payment_order_id"):
-        payment_order_data = {
-            "payment_id": booking_ctx.get("payment_id"),
-            "order_id": booking_ctx.get("payment_order_id"),
-            "amount": booking_ctx.get("payment_order_amount"),
-            "currency": booking_ctx.get("payment_currency"),
-        }
-        response_payload["payment_order"] = payment_order_data
-        msg_metadata["payment_order"] = payment_order_data
-
-    # Persist the approval decision as a conversation turn.
-    approval_turn_id: str | None = None
-    try:
-        decision_label = (
-            "Approved the action"
-            if approval_request.approval_decision == "approve"
-            else "Rejected the action"
-        )
-        approval_turn_id = _create_pending_turn(conversation_id, decision_label)
-    except Exception as exc:
-        print(f"[APPROVAL PERSISTENCE] Warning creating pending turn: {exc}")
-
-    if approval_turn_id is not None:
+        # Persist the approval decision as a conversation turn.
+        approval_turn_id: str | None = None
         try:
-            _complete_turn(
-                turn_id=approval_turn_id,
-                conversation_id=conversation_id,
-                assistant_message=result["final_response"],
-                metadata=msg_metadata or None,
+            decision_label = (
+                "Approved the action"
+                if approval_request.approval_decision == "approve"
+                else "Rejected the action"
             )
+            approval_turn_id = _create_pending_turn(conversation_id, decision_label)
         except Exception as exc:
-            print(f"[APPROVAL PERSISTENCE] Warning completing turn: {exc}")
+            print(f"[APPROVAL PERSISTENCE] Warning creating pending turn: {exc}")
 
-    return response_payload
+        if approval_turn_id is not None:
+            try:
+                _complete_turn(
+                    turn_id=approval_turn_id,
+                    conversation_id=conversation_id,
+                    assistant_message=result["final_response"],
+                    metadata=msg_metadata or None,
+                )
+            except Exception as exc:
+                print(f"[APPROVAL PERSISTENCE] Warning completing turn: {exc}")
+
+        return response_payload
+
+    return _stream_agent_turn(run_turn, finalize_turn)
 
 
 # ============================================================
@@ -1130,7 +1213,7 @@ def get_conversation_details(
 
     # Read LangGraph state for authoritative interrupts and booking context
     thread_id = f"{current_user.id}:{conversation_id}"
-    config = {
+    config: RunnableConfig = {
         "configurable": {
             "thread_id": thread_id,
             "current_user": current_user,

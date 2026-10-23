@@ -6,6 +6,7 @@
 
 import { createClient } from "@/utils/supabase/client";
 import type {
+  AgentStep,
   ChatApiResponse,
   ConversationListResponse,
   ConversationDetailResponse,
@@ -29,12 +30,114 @@ async function getAuthHeader(): Promise<Record<string, string>> {
   };
 }
 
+export type AgentStepHandler = (step: AgentStep) => void;
+
+/**
+ * Read an agent response.
+ *
+ * The backend streams Server-Sent Events:
+ *   event: step   -> one agent step (passed to onStep as it arrives)
+ *   event: final  -> the chat payload (this function resolves with it)
+ *   event: error  -> {status, detail} (this function throws)
+ *
+ * Errors raised before streaming starts (401, 404, 429...) are plain JSON.
+ */
+async function readAgentResponse(
+  response: Response,
+  failureLabel: string,
+  onStep?: AgentStepHandler,
+): Promise<ChatApiResponse> {
+  const contentType = response.headers.get("content-type") || "";
+
+  if (!response.ok || !contentType.includes("text/event-stream")) {
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      const errorMsg =
+        data?.detail ||
+        data?.error ||
+        `${failureLabel} with status ${response.status}`;
+      throw new Error(errorMsg);
+    }
+
+    return data as ChatApiResponse;
+  }
+
+  if (!response.body) {
+    throw new Error("The server returned an empty response stream.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const result: { final: ChatApiResponse | null } = { final: null };
+  let buffer = "";
+
+  const handleEvent = (rawEvent: string) => {
+    let eventName = "message";
+    const dataLines: string[] = [];
+
+    for (const line of rawEvent.split("\n")) {
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice(5).trim());
+      }
+    }
+
+    if (dataLines.length === 0) return;
+
+    const data = JSON.parse(dataLines.join("\n"));
+
+    if (eventName === "step") {
+      onStep?.(data as AgentStep);
+    } else if (eventName === "final") {
+      result.final = data as ChatApiResponse;
+    } else if (eventName === "error") {
+      throw new Error(data?.detail || `${failureLabel}.`);
+    }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+
+      buffer += decoder.decode(value, { stream: !done });
+      buffer = buffer.replace(/\r\n/g, "\n");
+
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        handleEvent(buffer.slice(0, boundary));
+        buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf("\n\n");
+      }
+
+      if (done) break;
+    }
+
+    if (buffer.trim()) {
+      handleEvent(buffer);
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+
+  if (!result.final) {
+    throw new Error(
+      "The connection closed before the agent finished. Please try again.",
+    );
+  }
+
+  return result.final;
+}
+
 /**
  * Send a chat message to the LangGraph AI agent.
+ * Agent steps are reported through onStep while the agent works.
  */
 export async function sendChatMessage(
   message: string,
   conversationId?: string,
+  onStep?: AgentStepHandler,
 ): Promise<ChatApiResponse> {
   const headers = await getAuthHeader();
 
@@ -48,15 +151,7 @@ export async function sendChatMessage(
     }),
   });
 
-  const data = await response.json().catch(() => null);
-
-  if (!response.ok) {
-    const errorMsg =
-      data?.detail || data?.error || `Request failed with status ${response.status}`;
-    throw new Error(errorMsg);
-  }
-
-  return data as ChatApiResponse;
+  return readAgentResponse(response, "Request failed", onStep);
 }
 
 /**
@@ -65,6 +160,7 @@ export async function sendChatMessage(
 export async function sendApprovalDecision(
   decision: "approve" | "reject",
   conversationId: string,
+  onStep?: AgentStepHandler,
 ): Promise<ChatApiResponse> {
   const headers = await getAuthHeader();
 
@@ -78,15 +174,7 @@ export async function sendApprovalDecision(
     }),
   });
 
-  const data = await response.json().catch(() => null);
-
-  if (!response.ok) {
-    const errorMsg =
-      data?.detail || data?.error || `Approval failed with status ${response.status}`;
-    throw new Error(errorMsg);
-  }
-
-  return data as ChatApiResponse;
+  return readAgentResponse(response, "Approval failed", onStep);
 }
 
 /**

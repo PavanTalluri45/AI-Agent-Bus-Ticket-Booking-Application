@@ -25,6 +25,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 load_dotenv()
 
 from bus_booking_ai_agent.auth.models import AuthenticatedUser
+from bus_booking_ai_agent.phase_04_langgraph.step_events import (
+    begin_step,
+    close_open_steps,
+    emit_done,
+    end_step,
+)
 from bus_booking_ai_agent.config.gemini import MODEL, client
 from bus_booking_ai_agent.phase_05_memory.memory_context import (
     get_relevant_memories,
@@ -913,6 +919,11 @@ def memory_node(
     print_node_banner("MEMORY NODE")
     print(f"User ID: {state['user_id']}")
     print(f"Memories retrieved: {len(memories)} (took {t_elapsed*1000:.1f}ms)")
+    emit_done(
+        "Loaded your saved preferences",
+        f"{len(memories)} found" if memories else "None saved yet",
+        duration_ms=int(t_elapsed * 1000),
+    )
 
     return {
         "memories": memories,
@@ -1512,7 +1523,7 @@ def handle_context_change_hold_release(
 
 
 
-def create_gemini_interaction(
+def _create_gemini_interaction(
     state: AgentState,
 ) -> Any:
     """
@@ -1590,6 +1601,34 @@ def create_gemini_interaction(
     usage = getattr(res, "usage", None)
     print(f"[GEMINI API] REQUEST END (User turn continuation) -> elapsed: {t_elapsed:.2f}s | id: {getattr(res, 'id', 'N/A')} | usage: {usage}")
     return res
+
+
+def create_gemini_interaction(
+    state: AgentState,
+) -> Any:
+    """Create the next Gemini interaction and report it as a live step."""
+
+    if not state.get("interaction_id"):
+        description = "Understanding your request"
+    elif (
+        state.get("tool_name")
+        and state.get("tool_call_id")
+        and state.get("tool_result")
+    ):
+        description = "Reading the tool results"
+    else:
+        description = "Continuing the conversation"
+
+    step_id = begin_step("Thinking", description)
+
+    try:
+        response = _create_gemini_interaction(state)
+    except Exception:
+        end_step(step_id, "Could not reach the AI model", status="error")
+        raise
+
+    end_step(step_id, "Thought it through", description)
+    return response
 
 
 def llm_node(
@@ -2172,12 +2211,20 @@ def ensure_selected_schedule_details(
     if "boarding_stops" in context and "dropping_stops" in context:
         return context
 
-    details_result = asyncio.run(
-        call_mcp_tool(
-            tool_name="get_bus_details",
-            arguments={"schedule_id": str(schedule_id)},
+    details_step = begin_step("Loading bus details")
+
+    try:
+        details_result = asyncio.run(
+            call_mcp_tool(
+                tool_name="get_bus_details",
+                arguments={"schedule_id": str(schedule_id)},
+            )
         )
-    )
+    except Exception:
+        end_step(details_step, "Could not load bus details", status="error")
+        raise
+
+    end_step(details_step, "Loaded bus details")
     details = details_result.get("result")
     if details is None:
         raise ToolGuardrailError(
@@ -2247,6 +2294,51 @@ def format_stop_selection_prompt(
 # ============================================================================
 
 
+def _tool_step_start(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> tuple[str, str | None]:
+    """Friendly running-step title and description for a tool call."""
+
+    if tool_name == "search_buses":
+        origin = arguments.get("origin", "")
+        destination = arguments.get("destination", "")
+        travel_date = arguments.get("travel_date", "")
+        route = f"{origin} to {destination}" if origin and destination else ""
+        return "Searching buses", f"{route} on {travel_date}".strip() if route else None
+
+    if tool_name == "get_bus_details":
+        return "Loading bus details", None
+
+    if tool_name == "check_seat_availability":
+        return "Checking seat availability", None
+
+    return "Running a tool", None
+
+
+def _tool_step_result(
+    tool_name: str,
+    result: dict[str, Any],
+) -> tuple[str, str | None]:
+    """Friendly finished-step title and description for a tool call."""
+
+    content = result.get("result")
+
+    if tool_name == "search_buses":
+        count = len(content) if isinstance(content, list) else 0
+        if count == 0:
+            return "Searched buses", "No buses found"
+        return "Searched buses", f"Found {count} bus{'es' if count != 1 else ''}"
+
+    if tool_name == "get_bus_details":
+        return "Loaded bus details", None
+
+    if tool_name == "check_seat_availability":
+        return "Checked seat availability", None
+
+    return "Finished a tool", None
+
+
 def tool_node(
     state: AgentState,
     config: RunnableConfig,
@@ -2275,6 +2367,13 @@ def tool_node(
     print_node_banner("TOOL NODE")
     print(f"Requested tool: {state['tool_name']}")
 
+    tool_step = begin_step(
+        *_tool_step_start(
+            state["tool_name"],
+            state.get("tool_arguments") or {},
+        )
+    )
+
     try:
         # If performing a new search while having an active hold, release it in DB first
         if state["tool_name"] == "search_buses":
@@ -2289,6 +2388,7 @@ def tool_node(
                         )
                         if released:
                             print(f"\n[HOLD RELEASED] Active hold {old_hold_id} released due to new bus search.")
+                            emit_done("Released your previous seat hold")
                     except Exception as err:
                         print(f"\n[HOLD RELEASE ERROR] Failed to release hold on new search: {err}")
 
@@ -2316,6 +2416,13 @@ def tool_node(
         )
         t_mcp_elapsed = time.perf_counter() - t_mcp_start
         print(f"\nMCP tool execution completed in {t_mcp_elapsed:.2f}s.")
+        end_step(
+            tool_step,
+            *_tool_step_result(
+                state["tool_name"],
+                structured_tool_result,
+            ),
+        )
 
 
         # Keep application state structured. Only the LLM-facing copy is
@@ -2349,6 +2456,12 @@ def tool_node(
     except Exception as error:
         t_total_tool = time.perf_counter() - t_tool_start
         print(f"Tool error (after {t_total_tool:.2f}s): {error}")
+        end_step(
+            tool_step,
+            "Tool step failed",
+            "Could not complete this step",
+            status="error",
+        )
 
         return {
             "tool_result": "",
@@ -2549,6 +2662,7 @@ def approval_node(
 
     if decision == "approve":
         print("\nHuman approval received: approve")
+        emit_done("Approval received", "You approved the request")
         return {
             "approval_status": "approved",
             "error": "",
@@ -2556,6 +2670,7 @@ def approval_node(
 
     if decision == "reject":
         print("\nHuman approval received: reject")
+        emit_done("Approval received", "You rejected the request")
         return {
             "approval_status": "rejected",
             "error": "",
@@ -2669,6 +2784,10 @@ def hold_execution_node(
 
     try:
         t_hold_start = time.perf_counter()
+        hold_step = begin_step(
+            "Reserving your seat",
+            "Creating a temporary seat hold",
+        )
         hold = create_hold(
             current_user=current_user,
             schedule_id=UUID(schedule_id_str),
@@ -2678,6 +2797,11 @@ def hold_execution_node(
         )
         t_hold_elapsed = time.perf_counter() - t_hold_start
         print(f"\n[HOLD CREATED] Database hold created in {t_hold_elapsed*1000:.1f}ms: ID={hold['id']}")
+        end_step(
+            hold_step,
+            "Seat reserved",
+            f"Seat {seat_num} is held temporarily" if seat_num else "Seat is held temporarily",
+        )
 
         hold_id = str(hold["id"])
         hold_expires_at = hold["expires_at"].isoformat()
@@ -2900,6 +3024,7 @@ def booking_execution_node(
 
     try:
         t_b_start = time.perf_counter()
+        booking_step = begin_step("Creating your booking")
         booking_res = create_payment_pending_booking(
             current_user=current_user,
             hold_id=UUID(hold_id_str),
@@ -2915,6 +3040,11 @@ def booking_execution_node(
         total_amount = str(booking_data["total_amount"])
 
         print(f"\n[BOOKING CREATED] Booking created in {t_b_elapsed*1000:.1f}ms: ID={booking_id}, Ref={booking_reference}")
+        end_step(
+            booking_step,
+            "Booking created",
+            f"Reference {booking_reference}",
+        )
 
         context["booking_id"] = booking_id
         context["booking_reference"] = booking_reference
@@ -2926,6 +3056,7 @@ def booking_execution_node(
 
         # Prepare payment order with Razorpay
         t_p_start = time.perf_counter()
+        payment_step = begin_step("Preparing secure payment")
         provider = RazorpayProvider()
         payment_res = prepare_payment(
             current_user=current_user,
@@ -2942,6 +3073,11 @@ def booking_execution_node(
         currency = str(provider_order["currency"])
 
         print(f"\n[PAYMENT PREPARED] Payment prepared in {t_p_elapsed*1000:.1f}ms: ID={payment_id}, OrderID={order_id}")
+        end_step(
+            payment_step,
+            "Payment ready",
+            "Secure checkout is ready",
+        )
 
         context["payment_id"] = payment_id
         context["payment_order_id"] = order_id
@@ -3727,6 +3863,17 @@ def run_agent(
             result["final_response"] = interrupt_value[
                 "message"
             ]
+
+    # ========================================================================
+    # Live step events
+    # ========================================================================
+
+    if isinstance(interrupts, (list, tuple)) and interrupts:
+        emit_done("Waiting for your approval", "Approve or reject to continue")
+
+    # Any step that never finished raised inside a node that handled the
+    # exception itself. Report it as failed instead of leaving it spinning.
+    close_open_steps("error")
 
     # ========================================================================
     # Final timing

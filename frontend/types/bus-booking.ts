@@ -34,6 +34,21 @@ export interface ConfirmedTicketData {
   dropping_point?: string;
 }
 
+export type AgentStepStatus = "running" | "done" | "error";
+
+/**
+ * One live step the agent reports while it works (thinking, calling a tool,
+ * holding a seat...). The backend sends the same step ID several times as it
+ * changes from "running" to "done" or "error"; the latest event wins.
+ */
+export interface AgentStep {
+  id: string;
+  title: string;
+  status: AgentStepStatus;
+  description?: string;
+  duration_ms?: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
@@ -43,6 +58,7 @@ export interface ChatMessage {
   booking?: BookingSummary;
   paymentOrder?: PaymentOrderSummary;
   confirmedTicket?: ConfirmedTicketData;
+  steps?: AgentStep[];
 }
 
 export interface StoredChatMessage {
@@ -53,6 +69,7 @@ export interface StoredChatMessage {
     approval_required?: boolean;
     booking?: BookingSummary;
     payment_order?: PaymentOrderSummary;
+    steps?: AgentStep[];
   } | null;
   created_at: string;
 }
