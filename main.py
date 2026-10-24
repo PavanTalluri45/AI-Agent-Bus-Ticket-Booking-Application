@@ -594,6 +594,10 @@ def _check_agent_rate_limit(current_user: AuthenticatedUser) -> None:
         )
 
 
+class ConversationUnavailableError(Exception):
+    """Conversation does not exist or has been deleted."""
+
+
 def _get_or_create_conversation(
     current_user: AuthenticatedUser,
     conversation_id: str | None,
@@ -621,7 +625,7 @@ def _get_or_create_conversation(
             row = conn.execute(
                 text("""
                     SELECT id FROM conversations
-                    WHERE id = :id AND auth_user_id = :user_id AND deleted_at IS NULL
+                    WHERE id = :id AND auth_user_id = :user_id AND NOT is_deleted
                 """),
                 {"id": str(conv_uuid), "user_id": str(current_user.id)},
             ).mappings().first()
@@ -673,10 +677,19 @@ def _create_pending_turn(
     with engine.begin() as conn:
         # Acquire a row-level lock on the conversation so that two concurrent
         # requests for the same conversation cannot race on MAX(turn_number).
-        conn.execute(
-            text("SELECT id FROM conversations WHERE id = :conv_id FOR UPDATE"),
+        # Under READ COMMITTED, a concurrent delete that commits first makes this
+        # SELECT return no row, so a deleted conversation can never get new turns.
+        locked = conn.execute(
+            text("""
+                SELECT id FROM conversations
+                WHERE id = :conv_id AND NOT is_deleted
+                FOR UPDATE
+            """),
             {"conv_id": conversation_id},
-        )
+        ).first()
+        if locked is None:
+            raise ConversationUnavailableError(conversation_id)
+
         turn_row = conn.execute(
             text("""
                 INSERT INTO conversation_turns
@@ -884,6 +897,12 @@ def chat_with_agent(
     turn_id: str | None = None
     try:
         turn_id = _create_pending_turn(conversation_id, user_text)
+    except ConversationUnavailableError:
+        # Deleted between ownership check and turn insert: do not run the agent.
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found or access denied.",
+        )
     except Exception as exc:
         print(f"[CHAT PERSISTENCE] Warning creating pending turn: {exc}")
 
@@ -961,11 +980,19 @@ def approve_agent_action(
     with engine.connect() as conn:
         row = conn.execute(
             text("""
-                SELECT id FROM conversations
-                WHERE id = :id AND auth_user_id = :user_id AND deleted_at IS NULL
+                SELECT id, is_deleted FROM conversations
+                WHERE id = :id AND auth_user_id = :user_id
             """),
             {"id": str(conv_uuid), "user_id": str(current_user.id)},
         ).mappings().first()
+
+    # A deleted conversation must never resume (its LangGraph checkpoint may
+    # still exist), so reject it before the legacy-session fallback below.
+    if row and row["is_deleted"]:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found or access denied.",
+        )
 
     if not row:
         # If not in conversations table, check if an active thread exists in LangGraph (e.g. tests or legacy session)
@@ -1059,7 +1086,7 @@ def list_conversations(
         "fetch_limit": limit + 1,
     }
 
-    where_clauses = ["c.auth_user_id = :user_id", "c.deleted_at IS NULL"]
+    where_clauses = ["c.auth_user_id = :user_id", "NOT c.is_deleted"]
 
     if search and search.strip():
         where_clauses.append(
@@ -1159,7 +1186,7 @@ def get_conversation_details(
             text("""
                 SELECT id, title, created_at, updated_at
                 FROM conversations
-                WHERE id = :id AND auth_user_id = :user_id AND deleted_at IS NULL
+                WHERE id = :id AND auth_user_id = :user_id AND NOT is_deleted
             """),
             {"id": str(conv_uuid), "user_id": str(current_user.id)},
         ).mappings().first()
@@ -1339,7 +1366,7 @@ def rename_conversation(
             text("""
                 UPDATE conversations
                 SET title = :title, updated_at = NOW()
-                WHERE id = :id AND auth_user_id = :user_id AND deleted_at IS NULL
+                WHERE id = :id AND auth_user_id = :user_id AND NOT is_deleted
             """),
             {"id": str(conv_uuid), "title": new_title, "user_id": str(current_user.id)},
         )
@@ -1360,7 +1387,8 @@ def delete_conversation(
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
-    Delete a conversation and its messages, and clear LangGraph thread checkpoints.
+    Soft-delete a conversation (is_deleted = TRUE) so it disappears from the
+    sidebar and every read/write endpoint, then clear its LangGraph checkpoints.
     """
     try:
         conv_uuid = UUID(conversation_id)
@@ -1369,21 +1397,31 @@ def delete_conversation(
 
     thread_id = f"{current_user.id}:{conversation_id}"
 
-    # Soft-delete the database record FIRST.
-    # LangGraph checkpoint cleanup happens AFTER the DB write succeeds,
-    # so a database failure cannot destroy checkpoint state prematurely.
+    # Soft-delete the database record FIRST, scoped to the owner and to rows
+    # that are still live (a repeat delete matches nothing -> 404).
+    # Checkpoint cleanup happens AFTER this commits, so a database failure
+    # cannot destroy checkpoint state prematurely.
     with engine.begin() as conn:
         result = conn.execute(
             text("""
                 UPDATE conversations
-                SET deleted_at = NOW()
-                WHERE id = :id AND auth_user_id = :user_id AND deleted_at IS NULL
+                SET is_deleted = TRUE
+                WHERE id = :id AND auth_user_id = :user_id AND NOT is_deleted
             """),
             {"id": str(conv_uuid), "user_id": str(current_user.id)},
         )
 
     if result.rowcount == 0:
         raise HTTPException(status_code=404, detail="Conversation not found or access denied.")
+
+    # Best-effort: the conversation is already hidden, so a cleanup failure
+    # must not turn a successful delete into an error for the user.
+    try:
+        delete_thread = getattr(checkpointer, "delete_thread", None)
+        if callable(delete_thread):
+            delete_thread(thread_id)
+    except Exception as exc:
+        print(f"[CONVERSATION DELETE] Checkpoint cleanup failed for {thread_id}: {exc}")
 
     return {
         "success": True,

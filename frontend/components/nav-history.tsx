@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
@@ -28,6 +28,17 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import {
   MoreHorizontal,
   Trash2,
@@ -66,6 +77,14 @@ export function NavHistory({
   const historyScrollRef = useRef<HTMLDivElement>(null);
   const loadMoreSentinelRef = useRef<HTMLDivElement>(null);
   const isLoadingMoreRef = useRef(false);
+
+  // Delete confirmation state. The target is kept after closing so the
+  // title doesn't blank out during the dialog's close animation.
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<ConversationListItem | null>(
+    null,
+  );
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const loadMore = useCallback(async () => {
     if (isLoading || !hasMore || isLoadingMoreRef.current) return;
@@ -128,10 +147,31 @@ export function NavHistory({
     return result;
   }, [conversations]);
 
-  const handleDelete = async (id: string) => {
-    await onDelete(id);
-    if (activeConversationId === id) {
-      router.push("/chat");
+  const openDeleteDialog = (item: ConversationListItem) => {
+    setDeleteTarget(item);
+    setIsDeleteDialogOpen(true);
+  };
+
+  // Block closing (Esc / backdrop / cancel) while the delete is running.
+  const handleDialogOpenChange = (open: boolean) => {
+    if (isDeleting) return;
+    setIsDeleteDialogOpen(open);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget || isDeleting) return;
+
+    setIsDeleting(true);
+    try {
+      await onDelete(deleteTarget.id);
+      if (activeConversationId === deleteTarget.id) {
+        router.push("/chat");
+      }
+      setIsDeleteDialogOpen(false);
+    } catch (err) {
+      console.error("Failed to delete conversation:", err);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -192,7 +232,7 @@ export function NavHistory({
                   </DropdownMenuTrigger>
                   <DropdownMenuContent side="right" align="start">
                     <DropdownMenuItem
-                      onClick={() => handleDelete(item.id)}
+                      onClick={() => openDeleteDialog(item)}
                       className="text-xs gap-2 text-destructive focus:text-destructive cursor-pointer"
                     >
                       <Trash2 className="size-3.5" />
@@ -209,63 +249,91 @@ export function NavHistory({
   };
 
   return (
-    <SidebarGroup className="group-data-[collapsible=icon]:hidden min-h-0 flex-1 px-2 space-y-2">
-      <div className="flex items-center justify-between px-2 pt-1">
-        <SidebarGroupLabel className="p-0 text-xs font-semibold text-muted-foreground">
-          Recent Chats
-        </SidebarGroupLabel>
-      </div>
+    <>
+      <SidebarGroup className="group-data-[collapsible=icon]:hidden min-h-0 flex-1 px-2 space-y-2">
+        <div className="flex items-center justify-between px-2 pt-1">
+          <SidebarGroupLabel className="p-0 text-xs font-semibold text-muted-foreground">
+            Recent Chats
+          </SidebarGroupLabel>
+        </div>
 
-      <div
-        ref={historyScrollRef}
-        className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain scroll-smooth pr-1"
+        <div
+          ref={historyScrollRef}
+          className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain scroll-smooth pr-1"
+        >
+          {conversations.length === 0 && isLoading ? (
+            <div className="flex items-center justify-center py-6 text-xs text-muted-foreground gap-2">
+              <Loader2 className="size-4 animate-spin" />
+              Loading conversations
+            </div>
+          ) : conversations.length === 0 && error ? (
+            <div role="alert" className="px-2 py-4 text-center text-xs text-destructive">
+              {error}
+            </div>
+          ) : conversations.length === 0 ? (
+            <Empty className="gap-2 border border-dashed p-4 my-2">
+              <EmptyHeader>
+                <EmptyTitle className="text-xs font-medium">No history yet</EmptyTitle>
+                <EmptyDescription className="text-[11px] text-muted-foreground">
+                  Your recent bus searches and bookings will appear here.
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          ) : (
+            <>
+              {renderSection("Today", groups.today)}
+              {renderSection("Yesterday", groups.yesterday)}
+              {renderSection("Previous 7 Days", groups.previous7Days)}
+              {renderSection("Older", groups.older)}
+
+              {error && (
+                <div role="alert" className="px-2 py-2 text-xs text-destructive">
+                  {error}
+                </div>
+              )}
+
+              {hasMore && (
+                <div
+                  ref={loadMoreSentinelRef}
+                  aria-hidden="true"
+                  className="flex min-h-8 items-center justify-center py-2"
+                >
+                  {isLoading && (
+                    <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </SidebarGroup>
+
+      {/* Single delete confirmation dialog, outside the list so it survives
+          the item being removed from the sidebar */}
+      <AlertDialog
+        open={isDeleteDialogOpen}
+        onOpenChange={handleDialogOpenChange}
       >
-        {conversations.length === 0 && isLoading ? (
-          <div className="flex items-center justify-center py-6 text-xs text-muted-foreground gap-2">
-            <Loader2 className="size-4 animate-spin" />
-            Loading conversations
-          </div>
-        ) : conversations.length === 0 && error ? (
-          <div role="alert" className="px-2 py-4 text-center text-xs text-destructive">
-            {error}
-          </div>
-        ) : conversations.length === 0 ? (
-          <Empty className="gap-2 border border-dashed p-4 my-2">
-            <EmptyHeader>
-              <EmptyTitle className="text-xs font-medium">No history yet</EmptyTitle>
-              <EmptyDescription className="text-[11px] text-muted-foreground">
-                Your recent bus searches and bookings will appear here.
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
-        ) : (
-          <>
-            {renderSection("Today", groups.today)}
-            {renderSection("Yesterday", groups.yesterday)}
-            {renderSection("Previous 7 Days", groups.previous7Days)}
-            {renderSection("Older", groups.older)}
-
-            {error && (
-              <div role="alert" className="px-2 py-2 text-xs text-destructive">
-                {error}
-              </div>
-            )}
-
-            {hasMore && (
-              <div
-                ref={loadMoreSentinelRef}
-                aria-hidden="true"
-                className="flex min-h-8 items-center justify-center py-2"
-              >
-                {isLoading && (
-                  <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
-                )}
-              </div>
-            )}
-          </>
-        )}
-
-      </div>
-    </SidebarGroup>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete chat?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete this {deleteTarget?.title} chat?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              onClick={handleConfirmDelete}
+              disabled={isDeleting}
+            >
+              {isDeleting && <Spinner />}
+              Delete
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

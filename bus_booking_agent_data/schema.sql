@@ -344,37 +344,68 @@ CREATE INDEX idx_seat_holds_booking
 
 
 -- =============================================================================
--- 11. CONVERSATIONS (Soft-deletable chat sessions)
+-- 11. CONVERSATIONS (chat sessions shown in the sidebar)
+--     is_deleted = false -> visible
+--     is_deleted = true  -> deleted by the user; hidden everywhere (soft delete)
 -- =============================================================================
 create table if not exists conversations (
     id           uuid primary key default gen_random_uuid(),
-    auth_user_id uuid not null,
+    auth_user_id uuid not null references auth.users (id) on delete cascade,
     title        text not null,
+    is_deleted   boolean not null default false,
     created_at   timestamptz not null default now(),
-    updated_at   timestamptz not null default now(),
-    deleted_at   timestamptz
+    updated_at   timestamptz not null default now()
 );
 
+-- Sidebar query: a user's live conversations, newest first (cursor pagination).
 create index if not exists idx_conversations_user_active
     on conversations (auth_user_id, updated_at desc, id desc)
-    where deleted_at is null;
-
+    where not is_deleted;
 
 -- =============================================================================
--- 12. CONVERSATION_TURNS (One row per user + assistant interaction turn)
+-- 12. CONVERSATION_TURNS (one row per user message + assistant reply)
+--     assistant_message stays NULL while the turn is pending or if the agent failed.
 -- =============================================================================
 create table if not exists conversation_turns (
     id                uuid primary key default gen_random_uuid(),
-    conversation_id   uuid not null references conversations(id) on delete cascade,
+    conversation_id   uuid not null references conversations (id) on delete cascade,
     turn_number       integer not null,
     user_message      text,
     assistant_message text,
     metadata          jsonb,
     created_at        timestamptz not null default now(),
     constraint conversation_turns_unique_turn unique (conversation_id, turn_number),
-    constraint conversation_turns_not_empty check (user_message is not null or assistant_message is not null)
+    constraint conversation_turns_not_empty
+        check (user_message is not null or assistant_message is not null)
 );
 
-create index if not exists idx_conversation_turns_conv_turn
-    on conversation_turns (conversation_id, turn_number asc);
+-- The unique constraint above already creates an index on
+-- (conversation_id, turn_number), so no separate index is needed.
 
+-- =============================================================================
+-- 13. ROW LEVEL SECURITY (Supabase: requires auth.uid())
+-- =============================================================================
+alter table conversations      enable row level security;
+alter table conversation_turns enable row level security;
+
+drop policy if exists conversations_owner_all on conversations;
+create policy conversations_owner_all on conversations
+    for all
+    using      (auth_user_id = auth.uid() and not is_deleted)
+    with check (auth_user_id = auth.uid());
+
+drop policy if exists conversation_turns_owner_all on conversation_turns;
+create policy conversation_turns_owner_all on conversation_turns
+    for all
+    using (
+        conversation_id in (
+            select id from conversations
+            where auth_user_id = auth.uid() and not is_deleted
+        )
+    )
+    with check (
+        conversation_id in (
+            select id from conversations
+            where auth_user_id = auth.uid() and not is_deleted
+        )
+    );
