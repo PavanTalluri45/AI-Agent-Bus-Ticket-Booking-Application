@@ -34,6 +34,22 @@ export interface ConfirmedTicketData {
   dropping_point?: string;
 }
 
+export type SeatStatus = "available" | "unavailable" | "held_by_you";
+
+export interface SeatMapSeat {
+  seat_number: string;
+  seat_type: string;
+  row_number: number | null;
+  column_number: number | null;
+  status: SeatStatus;
+}
+
+export interface SeatMapData {
+  bus_type: string | null;
+  selected_seat: string | null;
+  seats: SeatMapSeat[];
+}
+
 export type AgentStepStatus = "running" | "done" | "error";
 
 /**
@@ -58,6 +74,9 @@ export interface ChatMessage {
   booking?: BookingSummary;
   paymentOrder?: PaymentOrderSummary;
   confirmedTicket?: ConfirmedTicketData;
+  seatMap?: SeatMapData;
+  /** Seat the application resolved; undefined when the response carried none. */
+  selectedSeat?: string | null;
   steps?: AgentStep[];
 }
 
@@ -69,6 +88,8 @@ export interface StoredChatMessage {
     approval_required?: boolean;
     booking?: BookingSummary;
     payment_order?: PaymentOrderSummary;
+    seat_map?: SeatMapData;
+    selected_seat?: string | null;
     steps?: AgentStep[];
   } | null;
   created_at: string;
@@ -117,6 +138,8 @@ export interface ChatApiResponse {
   approval_required?: boolean;
   booking?: BookingSummary;
   payment_order?: PaymentOrderSummary;
+  seat_map?: SeatMapData;
+  selected_seat?: string | null;
   error?: string;
 }
 

@@ -16,6 +16,7 @@ import { ApprovalCard } from "./approval-card";
 import { PaymentCard } from "./payment-card";
 import { ConfirmedTicket } from "./confirmed-ticket";
 import { AgentSteps } from "./agent-steps";
+import { SeatMap } from "./seat-map";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -96,7 +97,7 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
   const [confirmedTicket, setConfirmedTicket] =
     useState<ConfirmedTicketData | null>(null);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -128,6 +129,8 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
               approvalRequired: m.metadata?.approval_required,
               booking: m.metadata?.booking,
               paymentOrder: m.metadata?.payment_order,
+              seatMap: m.metadata?.seat_map,
+              selectedSeat: m.metadata?.selected_seat,
               steps: m.metadata?.steps,
             };
           });
@@ -178,7 +181,13 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
   }, [initialConversationId]);
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const container = messagesContainerRef.current;
+    if (container) {
+      container.scrollTo({
+        top: container.scrollHeight,
+        behavior: "smooth",
+      });
+    }
   };
 
   useEffect(() => {
@@ -296,15 +305,15 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
   };
 
   // 1. Send normal user chat message
-  const handleSendMessage = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    const text = inputValue.trim();
+  const sendMessage = async (messageText: string) => {
+    const text = messageText.trim();
     if (
       !text ||
       isLoading ||
       approvalRequired ||
       isPaymentOpen ||
-      isVerifying
+      isVerifying ||
+      isInitialLoading
     ) {
       return;
     }
@@ -352,6 +361,8 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
         approvalRequired: data.approval_required,
         booking: data.booking,
         paymentOrder: data.payment_order,
+        seatMap: data.seat_map,
+        selectedSeat: data.selected_seat,
         steps: collected.length > 0 ? collected : undefined,
       };
 
@@ -383,6 +394,11 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
       setLiveSteps([]);
       setIsLoading(false);
     }
+  };
+
+  const handleSendMessage = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    void sendMessage(inputValue);
   };
 
   // 2. Handle HITL Approve
@@ -488,6 +504,30 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
 
   const isInputDisabled =
     isLoading || approvalRequired || isPaymentOpen || isVerifying || isInitialLoading;
+  // The seat map is shown once, in the response that checked availability.
+  let newestSeatMapIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].seatMap) {
+      newestSeatMapIndex = i;
+      break;
+    }
+  }
+  const newestSeatMapMessage =
+    newestSeatMapIndex >= 0 ? messages[newestSeatMapIndex] : undefined;
+  const laterMessages =
+    newestSeatMapIndex >= 0 ? messages.slice(newestSeatMapIndex + 1) : [];
+  // Once the hold, booking or payment step starts, the map stops being clickable.
+  const seatMapLocked = laterMessages.some(
+    (m) => m.approvalRequired || m.booking || m.paymentOrder || m.confirmedTicket,
+  );
+  // The seat the application actually resolved, taken from the latest response.
+  let resolvedSeat: string | null | undefined;
+  for (let i = messages.length - 1; i > newestSeatMapIndex; i--) {
+    if (messages[i].role === "assistant" && messages[i].selectedSeat !== undefined) {
+      resolvedSeat = messages[i].selectedSeat;
+      break;
+    }
+  }
 
   const displayName =
     user?.user_metadata?.full_name ||
@@ -555,7 +595,10 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
           </EmptyContent>
         </Empty>
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain scroll-smooth py-4 space-y-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <div
+          ref={messagesContainerRef}
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain scroll-smooth py-4 space-y-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
           {messages.map((msg) => {
             const isUser = msg.role === "user";
             return (
@@ -605,6 +648,16 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
                   >
                     {msg.content}
                   </div>
+                  {!isUser && msg.id === newestSeatMapMessage?.id && msg.seatMap && (
+                    <SeatMap
+                      data={msg.seatMap}
+                      selectedSeat={resolvedSeat}
+                      interactive={!seatMapLocked && !isInputDisabled}
+                      onSelectSeat={(seatNumber) => {
+                        void sendMessage(`I want seat ${seatNumber}`);
+                      }}
+                    />
+                  )}
                   {msg.timestamp && (
                     <span className="text-[10px] text-muted-foreground mt-1 px-1">
                       {msg.timestamp}
@@ -701,7 +754,6 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
             </div>
           )}
 
-          <div ref={messagesEndRef} />
         </div>
       )}
 
