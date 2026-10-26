@@ -32,7 +32,36 @@ export interface ConfirmedTicketData {
   travel_date?: string;
   boarding_point?: string;
   dropping_point?: string;
+  boarding_time?: string;
+  boarding_day_offset?: number;
+  dropping_time?: string;
+  dropping_day_offset?: number;
 }
+
+export type SelectionOptionsKind = "bus" | "stops";
+
+export interface BusSelectionOptionItem {
+  label: string;
+  detail: string;
+}
+
+export interface StopSelectionOptionItem {
+  label: string;
+  display_time: string;
+  sequence_number: number;
+  selected?: boolean;
+}
+
+export type SelectionOptionsData =
+  | {
+      kind: "bus";
+      items: BusSelectionOptionItem[];
+    }
+  | {
+      kind: "stops";
+      boarding: StopSelectionOptionItem[];
+      dropping: StopSelectionOptionItem[];
+    };
 
 export type SeatStatus = "available" | "unavailable" | "held_by_you";
 
@@ -75,6 +104,7 @@ export interface ChatMessage {
   paymentOrder?: PaymentOrderSummary;
   confirmedTicket?: ConfirmedTicketData;
   seatMap?: SeatMapData;
+  options?: SelectionOptionsData;
   /** Seat the application resolved; undefined when the response carried none. */
   selectedSeat?: string | null;
   steps?: AgentStep[];
@@ -89,6 +119,7 @@ export interface StoredChatMessage {
     booking?: BookingSummary;
     payment_order?: PaymentOrderSummary;
     seat_map?: SeatMapData;
+    options?: SelectionOptionsData;
     selected_seat?: string | null;
     steps?: AgentStep[];
   } | null;
@@ -139,6 +170,7 @@ export interface ChatApiResponse {
   booking?: BookingSummary;
   payment_order?: PaymentOrderSummary;
   seat_map?: SeatMapData;
+  options?: SelectionOptionsData;
   selected_seat?: string | null;
   error?: string;
 }

@@ -5,7 +5,7 @@ import os
 import re
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict, cast
 from urllib.parse import quote_plus
@@ -127,13 +127,34 @@ Follow these rules at all times:
 23. Call the create_seat_hold tool ONLY when the user explicitly requests to hold, reserve, lock, or proceed with holding the selected seat (e.g. "Please hold seat 1B", "Hold my seat", "Reserve this seat", "Lock this seat", "Can you hold this seat for me?", "Proceed with holding this seat").
 24. The create_seat_hold tool takes no arguments ({}). Never invent or provide UUIDs, schedule IDs, seat IDs, or stop IDs. All identifiers are resolved by the application from authoritative application state.
 25. Do not ask redundant confirmation questions before calling create_seat_hold when the user has already asked to hold or reserve the seat. The application workflow manages human approval directly.
-26. After a seat hold is confirmed, collect the passenger's full name, age, and gender one at a time if any are missing. Ask for each missing field individually; never invent or assume these details.
+26. After a seat hold is confirmed, ask for the passenger's full name, age, and gender together in ONE message. If some details are already provided, ask only for the missing ones, together in one message. Never invent or assume these details.
 27. Call the create_payment_pending_booking tool ONLY when: (a) a seat hold is active in booking_context (hold_id is present), AND (b) the user has confirmed all three passenger details (passenger_name, passenger_age, passenger_gender), AND (c) the user explicitly confirms they want to proceed with booking.
 28. The create_payment_pending_booking tool accepts ONLY passenger details: passenger_name (string), passenger_age (integer), passenger_gender (string). Never provide any IDs, hold_id, schedule_id, seat_id, or stop IDs in the arguments.
 29. Do not call create_payment_pending_booking if booking_context already contains a booking_id. A booking has already been created.
 30. After a booking is created and payment order is returned, inform the user of their booking reference and the total amount. Do not reveal internal UUIDs or payment order IDs to the user.
 31. Do not ask redundant confirmation questions before calling create_payment_pending_booking when all passenger details have been provided and the user confirms they want to book. The application workflow manages human approval directly.
+32. Keep replies short. When several details are needed, ask for all of them in one message.
+33. total_seats is bus capacity, never seat availability. Use free_seats for availability.
+34. When listing buses, show operator, bus type, departure and arrival time, fare, and seats free.
+35. Copy the *_display time strings from tool results exactly. Never convert, reformat, or calculate a time yourself.
+36. The display strings already use 12-hour time without seconds, and include "(next day)" only when the corresponding day offset is greater than 0. Do not add or remove that suffix.
+37. When tappable bus or stop options are shown by the application, do not list the options again in response text. Write one short sentence directing the user to the options.
+38. Show hold expiry exactly as the application provides it. Never convert it or show UTC.
 """
+
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
+
+
+def format_hold_expiry(value: datetime | str) -> str:
+    """Format a hold expiry in fixed Indian Standard Time."""
+    try:
+        expiry = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        display = expiry.astimezone(IST).strftime("%I:%M %p").lstrip("0")
+        return f"{display} IST"
+    except (TypeError, ValueError, OverflowError):
+        return str(value)
 
 
 # ============================================================================
@@ -201,7 +222,14 @@ class BookingContext(TypedDict, total=False):
     boarding_stops: list[dict[str, Any]]
     dropping_stops: list[dict[str, Any]]
     available_seats: list[dict[str, Any]]
+    seat_map: list[dict[str, Any]]
+    seat_map_segment: str
+    # True only during the turn in which availability was checked, so the seat
+    # map is shown once instead of being attached to every later response.
+    seat_map_fresh: bool
     available_schedules: list[dict[str, Any]]
+    options_kind: Literal["bus", "stops"]
+    options_fresh: bool
 
 
 # ============================================================================
@@ -709,17 +737,48 @@ def validate_tool_result(
             raise ToolGuardrailError(
                 "check_seat_availability result must contain a list."
             )
+        for seat in content:
+            if (
+                not isinstance(seat, dict)
+                or seat.get("status") not in {"available", "unavailable"}
+                or not seat.get("seat_id")
+                or not seat.get("seat_number")
+                or not seat.get("seat_type")
+                or "row_number" not in seat
+                or "column_number" not in seat
+            ):
+                raise ToolGuardrailError(
+                    "check_seat_availability seats must include their identity, "
+                    "layout fields, and an 'available' or 'unavailable' status."
+                )
 
     return result
 
 
-def serialize_tool_result_for_llm(result: dict[str, Any]) -> str:
+def serialize_tool_result_for_llm(
+    result: dict[str, Any],
+    tool_name: str | None = None,
+) -> str:
     """Create the security-wrapped representation sent to Gemini.
 
     This representation is for LLM context only and is never parsed back
     into application state.
     """
-    serialized_result = json.dumps(result, default=str)
+    llm_result = result
+    if tool_name == "check_seat_availability":
+        content = result.get("result")
+        if isinstance(content, list):
+            llm_result = {
+                **result,
+                "result": [
+                    seat
+                    for seat in content
+                    if isinstance(seat, dict)
+                    and seat.get("status") == "available"
+                ],
+            }
+
+    serialized_result = json.dumps(llm_result, default=str)
     return (
         "<untrusted_tool_result>\n"
         "The following data came from an application tool/database. "
@@ -833,10 +892,13 @@ def build_llm_input(
 
     memory_context = build_memory_context(state["memories"])
 
-    booking_context = json.dumps(
-        state.get("booking_context", {}),
-        default=str,
-    )
+    llm_booking_context = state.get("booking_context", {}).copy()
+    llm_booking_context.pop("seat_map", None)
+    llm_booking_context.pop("seat_map_segment", None)
+    llm_booking_context.pop("seat_map_fresh", None)
+    llm_booking_context.pop("options_kind", None)
+    llm_booking_context.pop("options_fresh", None)
+    booking_context = json.dumps(llm_booking_context, default=str)
 
     booking_status = (
         "BOOKING_CONFIRMED"
@@ -1053,6 +1115,11 @@ def _resolve_selected_bus(
                 "boarding_stops",
                 "dropping_stops",
                 "available_seats",
+                "seat_map",
+                "seat_map_segment",
+                "seat_map_fresh",
+                "options_kind",
+                "options_fresh",
                 "seat_id",
                 "seat_number",
             ):
@@ -1263,6 +1330,16 @@ def _resolve_selected_stops(
         if dropping is None:
             dropping = find_matching_stop(dropping_stops, require_triggers=False)
 
+    if boarding and dropping:
+        boarding_sequence = boarding.get("sequence_number")
+        dropping_sequence = dropping.get("sequence_number")
+        if (
+            boarding_sequence is not None
+            and dropping_sequence is not None
+            and int(boarding_sequence) >= int(dropping_sequence)
+        ):
+            return resolved
+
     if boarding and boarding.get("stop_id"):
         resolved["boarding_stop_id"] = str(boarding["stop_id"])
         resolved["boarding_stop_name"] = str(boarding.get("stop_name", ""))
@@ -1281,7 +1358,35 @@ def _resolve_selected_seat(
     user_message: str,
 ) -> BookingContext:
     """Resolve an exact human-readable seat selection from authoritative availability."""
-    available_seats = context.get("available_seats", [])
+    current_segment = (
+        f"{context.get('boarding_stop_id')}:{context.get('dropping_stop_id')}"
+        if context.get("boarding_stop_id") and context.get("dropping_stop_id")
+        else None
+    )
+    seat_map = context.get("seat_map")
+    if (
+        not current_segment
+        or context.get("seat_map_segment") != current_segment
+        or not isinstance(seat_map, list)
+    ):
+        return context
+
+    available_seats = []
+    available_map_by_number = {
+        str(seat.get("seat_number")): seat
+        for seat in seat_map
+        if isinstance(seat, dict) and seat.get("status") == "available"
+    }
+    for seat in context.get("available_seats", []):
+        map_seat = available_map_by_number.get(str(seat.get("seat_number", "")))
+        if (
+            map_seat
+            and seat.get("seat_id")
+            and seat.get("status") == "available"
+            and str(map_seat.get("seat_id")) == str(seat["seat_id"])
+        ):
+            available_seats.append(seat)
+
     if not available_seats:
         return context
 
@@ -1357,17 +1462,13 @@ def _message_selects_resolved_seat(
     if available_seats:
         return (
             len(matched_seats) == 1
+            and matched_seats[0].get("status") == "available"
             and str(matched_seats[0].get("seat_number", "")).casefold()
             == seat_number.casefold()
             and str(matched_seats[0].get("seat_id") or "") == seat_id
         )
 
-    return bool(
-        re.search(
-            rf"(?<![a-z0-9]){re.escape(seat_number.casefold())}(?![a-z0-9])",
-            message,
-        )
-    )
+    return False
 
 
 def resolve_booking_context(
@@ -1377,6 +1478,31 @@ def resolve_booking_context(
     """Resolve only unambiguous human selections from authoritative state."""
     resolved = _resolve_selected_bus(context, user_message)
     resolved = _resolve_selected_stops(resolved, user_message)
+    if any(
+        resolved.get(key) != context.get(key)
+        for key in ("boarding_stop_id", "dropping_stop_id")
+    ):
+        resolved = resolved.copy()
+        for key in (
+            "available_seats",
+            "seat_map",
+            "seat_map_segment",
+            "seat_map_fresh",
+            "options_kind",
+            "options_fresh",
+            "seat_id",
+            "seat_number",
+        ):
+            resolved.pop(key, None)
+        if resolved.get("boarding_stop_id") and not resolved.get("dropping_stop_id"):
+            resolved["options_kind"] = "stops"
+            resolved["options_fresh"] = True
+        elif resolved.get("dropping_stop_id") and not resolved.get("boarding_stop_id"):
+            resolved["options_kind"] = "stops"
+            resolved["options_fresh"] = True
+        else:
+            resolved.pop("options_kind", None)
+            resolved.pop("options_fresh", None)
     return _resolve_selected_seat(resolved, user_message)
 
 
@@ -1707,7 +1833,9 @@ def llm_node(
 
         # Check if the existing hold in context has expired
         if resolved_context.get("hold_id") and is_hold_expired(resolved_context):
-            expired_time = resolved_context.get("hold_expires_at", "")
+            expired_time = format_hold_expiry(
+                resolved_context.get("hold_expires_at", "")
+            )
             seat_num = resolved_context.get("seat_number", "")
             print(f"\n[HOLD EXPIRED] Hold {resolved_context.get('hold_id')} expired at {expired_time}")
             resolved_context = resolved_context.copy()
@@ -1889,9 +2017,9 @@ def llm_node(
                         "approval_status": "executed",
                         "tool_result": "",
                         "final_response": (
-                            f"Seat {seat_num} is already held for you until {expires_at_str}. "
+                            f"Seat {seat_num} is already held for you until {format_hold_expiry(expires_at_str)}. "
                             "This is a temporary reservation, not a confirmed ticket. "
-                            "Would you like to provide passenger details to proceed with your booking?"
+                            "Please send the passenger's full name, age and gender in one message to continue."
                         ),
                         "iteration": iteration,
                         "error": "",
@@ -2143,6 +2271,9 @@ def update_booking_context_from_tool_result(
             "boarding_stops",
             "dropping_stops",
             "available_seats",
+            "seat_map",
+            "seat_map_segment",
+            "seat_map_fresh",
             "seat_id",
             "seat_number",
             "hold_id",
@@ -2151,6 +2282,9 @@ def update_booking_context_from_tool_result(
             updated.pop(key, None)
 
         updated["available_schedules"] = content
+        if content:
+            updated["options_kind"] = "bus"
+            updated["options_fresh"] = True
         return updated
 
     if tool_name == "get_bus_details" and isinstance(content, dict):
@@ -2179,6 +2313,18 @@ def update_booking_context_from_tool_result(
             updated["boarding_stops"] = boarding_stops
         if isinstance(dropping_stops, list):
             updated["dropping_stops"] = dropping_stops
+        if (
+            isinstance(boarding_stops, list)
+            and boarding_stops
+            and isinstance(dropping_stops, list)
+            and dropping_stops
+        ):
+            if not updated.get("boarding_stop_id"):
+                updated["options_kind"] = "stops"
+                updated["options_fresh"] = True
+            elif not updated.get("dropping_stop_id"):
+                updated["options_kind"] = "stops"
+                updated["options_fresh"] = True
         return updated
 
     if tool_name == "check_seat_availability" and isinstance(content, list):
@@ -2191,7 +2337,22 @@ def update_booking_context_from_tool_result(
         if arguments.get("dropping_stop_id"):
             updated["dropping_stop_id"] = str(arguments["dropping_stop_id"])
 
-        updated["available_seats"] = content
+        updated["available_seats"] = [
+            seat
+            for seat in content
+            if isinstance(seat, dict) and seat.get("status") == "available"
+        ]
+        updated["seat_map"] = content
+        # Show the map in this turn's response only.
+        updated["seat_map_fresh"] = True
+        boarding_stop_id = arguments.get("boarding_stop_id")
+        dropping_stop_id = arguments.get("dropping_stop_id")
+        if boarding_stop_id and dropping_stop_id:
+            updated["seat_map_segment"] = (
+                f"{boarding_stop_id}:{dropping_stop_id}"
+            )
+        else:
+            updated.pop("seat_map_segment", None)
 
         # A fresh availability check invalidates an old seat selection.
         updated.pop("seat_id", None)
@@ -2243,50 +2404,14 @@ def format_stop_selection_prompt(
     context: BookingContext,
 ) -> str:
     """Ask for the explicit route segment needed for seat availability."""
-
-    def format_stops(stops: list[dict[str, Any]]) -> str:
-        names = [
-            str(stop.get("stop_name", "")).strip()
-            for stop in stops
-            if str(stop.get("stop_name", "")).strip()
-        ]
-        return ", ".join(names) if names else "none returned"
-
-    boarding_stops = format_stops(context.get("boarding_stops", []))
-    dropping_stops = format_stops(context.get("dropping_stops", []))
-
-    if boarding_stops == "none returned" or dropping_stops == "none returned":
+    if not context.get("boarding_stops") or not context.get("dropping_stops"):
         return (
             "I couldn't find boarding and drop-off stop options for this bus, "
             "so I can't check segment-specific seat availability. Please try "
             "another bus or contact support."
         )
 
-    # If only boarding stop is selected, ask only for dropping stop
-    if context.get("boarding_stop_id") and not context.get("dropping_stop_id"):
-        boarding_name = context.get("boarding_stop_name") or "selected stop"
-        return (
-            f"Boarding stop is set to {boarding_name}. Please choose your dropping stop "
-            f"so we can check seat availability.\n"
-            f"Drop-off stops: {dropping_stops}."
-        )
-
-    # If only dropping stop is selected, ask only for boarding stop
-    if context.get("dropping_stop_id") and not context.get("boarding_stop_id"):
-        dropping_name = context.get("dropping_stop_name") or "selected stop"
-        return (
-            f"Dropping stop is set to {dropping_name}. Please choose your boarding stop "
-            f"so we can check seat availability.\n"
-            f"Boarding stops: {boarding_stops}."
-        )
-
-    return (
-        "Seat availability depends on the journey segment. Please choose "
-        "where you want to board and where you want to get off.\n"
-        f"Boarding stops: {boarding_stops}.\n"
-        f"Drop-off stops: {dropping_stops}.\n"
-        "For example: \"Boarding stop <stop> and dropping stop <stop>\" or \"From <stop> to <stop>\"."
-    )
+    return "Choose your boarding and drop-off stops below to continue."
 
 
 # ============================================================================
@@ -2438,7 +2563,8 @@ def tool_node(
 
         t_ser_start = time.perf_counter()
         tool_result_for_llm = serialize_tool_result_for_llm(
-            structured_tool_result
+            structured_tool_result,
+            tool_name=state["tool_name"],
         )
         print(f"[TOOL NODE] serialize_tool_result took {(time.perf_counter() - t_ser_start)*1000:.1f}ms (length: {len(tool_result_for_llm)} chars)")
 
@@ -2773,8 +2899,8 @@ def hold_execution_node(
             "pending_action": None,
             "approval_status": "executed",
             "final_response": (
-                f"Seat {seat_num} is already held for you until {expires_at_str}. "
-                "Would you like to provide passenger details to proceed with your booking?"
+                f"Seat {seat_num} is already held for you until {format_hold_expiry(expires_at_str)}. "
+                "Please send the passenger's full name, age and gender in one message to continue."
             ),
             "error": "",
         }
@@ -2808,17 +2934,13 @@ def hold_execution_node(
 
         context.update({"hold_id": hold_id, "hold_expires_at": hold_expires_at})
 
-        expires_display = (
-            hold["expires_at"].strftime("%H:%M UTC")
-            if hasattr(hold["expires_at"], "strftime")
-            else hold_expires_at
-        )
+        expires_display = format_hold_expiry(hold["expires_at"])
 
         final_response = (
             f"Seat {seat_num} on {operator} has been successfully held for you! "
             f"This hold is active until {expires_display} (10 minutes). "
             "Please note: A hold is a temporary reservation, not a confirmed ticket. "
-            "Would you like to provide passenger details to proceed with your booking?"
+            "Please send the passenger's full name, age and gender in one message to continue."
         )
 
         return {
@@ -3605,14 +3727,7 @@ def run_agent(
                     "",
                 )
 
-                expires_display = hold_expires_at
-
-                try:
-                    expires_display = datetime.fromisoformat(
-                        hold_expires_at
-                    ).strftime("%H:%M UTC")
-                except (TypeError, ValueError):
-                    pass
+                expires_display = format_hold_expiry(hold_expires_at)
 
                 print(
                     "[APPROVAL] Active hold already exists. "
@@ -3792,11 +3907,22 @@ def run_agent(
                 ),
             )
 
+            # The seat map belongs to the turn that checked availability. Every
+            # new turn starts without it; a new availability check sets it again.
+            continued_booking_context = cast(
+                BookingContext,
+                {
+                    key: value
+                    for key, value in existing_booking_context.items()
+                    if key not in {"seat_map_fresh", "options_fresh"}
+                },
+            )
+
             continued_state: AgentState = {
                 "user_id": str(current_user.id),
                 "user_message": user_message,
                 "memories": [],
-                "booking_context": existing_booking_context,
+                "booking_context": continued_booking_context,
                 "interaction_id": existing_state.get(
                     "interaction_id",
                     "",

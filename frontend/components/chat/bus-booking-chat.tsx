@@ -17,6 +17,7 @@ import { PaymentCard } from "./payment-card";
 import { ConfirmedTicket } from "./confirmed-ticket";
 import { AgentSteps } from "./agent-steps";
 import { SeatMap } from "./seat-map";
+import { SelectionOptions } from "./selection-options";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -130,6 +131,7 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
               booking: m.metadata?.booking,
               paymentOrder: m.metadata?.payment_order,
               seatMap: m.metadata?.seat_map,
+              options: m.metadata?.options,
               selectedSeat: m.metadata?.selected_seat,
               steps: m.metadata?.steps,
             };
@@ -362,6 +364,7 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
         booking: data.booking,
         paymentOrder: data.payment_order,
         seatMap: data.seat_map,
+        options: data.options,
         selectedSeat: data.selected_seat,
         steps: collected.length > 0 ? collected : undefined,
       };
@@ -514,11 +517,30 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
   }
   const newestSeatMapMessage =
     newestSeatMapIndex >= 0 ? messages[newestSeatMapIndex] : undefined;
+  let newestOptionsIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].options) {
+      newestOptionsIndex = i;
+      break;
+    }
+  }
+  const newestOptionsMessage =
+    newestOptionsIndex >= 0 ? messages[newestOptionsIndex] : undefined;
   const laterMessages =
     newestSeatMapIndex >= 0 ? messages.slice(newestSeatMapIndex + 1) : [];
   // Once the hold, booking or payment step starts, the map stops being clickable.
-  const seatMapLocked = laterMessages.some(
-    (m) => m.approvalRequired || m.booking || m.paymentOrder || m.confirmedTicket,
+  const seatMapLocked = Boolean(
+    approvalRequired ||
+      activeBooking ||
+      paymentOrder ||
+      confirmedTicket ||
+      laterMessages.some(
+        (m) =>
+          m.approvalRequired ||
+          m.booking ||
+          m.paymentOrder ||
+          m.confirmedTicket,
+      ),
   );
   // The seat the application actually resolved, taken from the latest response.
   let resolvedSeat: string | null | undefined;
@@ -650,14 +672,37 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
                   </div>
                   {!isUser && msg.id === newestSeatMapMessage?.id && msg.seatMap && (
                     <SeatMap
+                      key={
+                        resolvedSeat ??
+                        msg.seatMap.selected_seat ??
+                        "unselected"
+                      }
                       data={msg.seatMap}
                       selectedSeat={resolvedSeat}
+                      locked={seatMapLocked}
                       interactive={!seatMapLocked && !isInputDisabled}
                       onSelectSeat={(seatNumber) => {
                         void sendMessage(`I want seat ${seatNumber}`);
                       }}
                     />
                   )}
+                  {!isUser &&
+                    msg.id === newestOptionsMessage?.id &&
+                    msg.options && (
+                      <SelectionOptions
+                        options={msg.options}
+                        interactive={
+                          newestOptionsIndex === messages.length - 1 &&
+                          !isInputDisabled
+                        }
+                        onSelect={(label) => void sendMessage(label)}
+                        onContinue={(boarding, dropping) => {
+                          void sendMessage(
+                            `Boarding stop: ${boarding.label}, Dropping stop: ${dropping.label}`,
+                          );
+                        }}
+                      />
+                    )}
                   {msg.timestamp && (
                     <span className="text-[10px] text-muted-foreground mt-1 px-1">
                       {msg.timestamp}

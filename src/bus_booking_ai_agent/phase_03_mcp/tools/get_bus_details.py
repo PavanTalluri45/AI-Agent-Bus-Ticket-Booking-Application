@@ -4,6 +4,10 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from bus_booking_ai_agent.config.database import engine
+from bus_booking_ai_agent.phase_03_mcp.tools.schedule_time_utils import (
+    add_day_offsets,
+    format_time_display,
+)
 
 
 class GetBusDetailsInput(BaseModel):
@@ -31,6 +35,25 @@ SELECT
     r.destination,
     r.distance_km,
     r.estimated_duration_minutes,
+
+    COALESCE(
+        (
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'stop_id', rs.id,
+                    'sequence_number', rs.sequence_number,
+                    'arrival_time', ss.arrival_time,
+                    'departure_time', ss.departure_time
+                )
+                ORDER BY rs.sequence_number
+            )
+            FROM schedule_stops ss
+            JOIN route_stops rs
+                ON rs.id = ss.route_stop_id
+            WHERE ss.schedule_id = s.id
+        ),
+        '[]'::jsonb
+    ) AS _schedule_stops,
 
     COALESCE(
         (
@@ -108,4 +131,29 @@ def get_bus_details(request: GetBusDetailsInput) -> dict | None:
         if row is None:
             return None
 
-        return dict(row._mapping)
+        details = dict(row._mapping)
+        schedule_stops = add_day_offsets(details.pop("_schedule_stops"))
+        stop_offsets = {
+            str(stop["stop_id"]): stop for stop in schedule_stops
+        }
+
+        for stop_group in ("boarding_stops", "dropping_stops"):
+            for stop in details[stop_group]:
+                offsets = stop_offsets[str(stop["stop_id"])]
+                stop.update(
+                    {
+                        "day_offset": offsets["day_offset"],
+                        "arrival_day_offset": offsets["arrival_day_offset"],
+                        "departure_day_offset": offsets["departure_day_offset"],
+                        "arrival_display": format_time_display(
+                            stop["arrival_time"],
+                            offsets["arrival_day_offset"],
+                        ),
+                        "departure_display": format_time_display(
+                            stop["departure_time"],
+                            offsets["departure_day_offset"],
+                        ),
+                    }
+                )
+
+        return details

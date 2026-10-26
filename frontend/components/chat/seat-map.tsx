@@ -1,6 +1,7 @@
 "use client";
 
-import type { SeatMapData, SeatMapSeat, SeatStatus } from "@/types/bus-booking";
+import { useState } from "react";
+import type { SeatMapData, SeatMapSeat } from "@/types/bus-booking";
 import { getSeatLayout } from "./seat-layout";
 
 /**
@@ -17,6 +18,7 @@ interface SeatMapProps {
   data: SeatMapData;
   interactive: boolean;
   onSelectSeat: (seatNumber: string) => void;
+  locked?: boolean;
   /** Seat the application resolved. Falls back to the one stored in the map. */
   selectedSeat?: string | null;
 }
@@ -191,12 +193,40 @@ export function SeatMap({
   data,
   interactive,
   onSelectSeat,
+  locked = false,
   selectedSeat,
 }: SeatMapProps) {
   const layout = getSeatLayout(data.seats);
   const selected = selectedSeat !== undefined ? selectedSeat : data.selected_seat;
+  const [expanded, setExpanded] = useState(false);
   const available = data.seats.filter((s) => s.status === "available").length;
-  const buttonProps = { selectedSeat: selected, interactive, onSelectSeat };
+  const buttonProps = {
+    selectedSeat: selected,
+    interactive: interactive && !locked,
+    onSelectSeat,
+  };
+
+  if (selected && !expanded) {
+    return (
+      <section
+        aria-label="Seat selection"
+        className="mt-3 flex w-full max-w-[480px] items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3 text-card-foreground"
+      >
+        <span className="text-sm font-medium">Seat {selected} selected</span>
+        {!locked && (
+          <button
+            type="button"
+            aria-label={`Change selected seat ${selected}`}
+            disabled={!interactive}
+            onClick={() => setExpanded(true)}
+            className="rounded-lg border border-border bg-background px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60"
+          >
+            Change seat
+          </button>
+        )}
+      </section>
+    );
+  }
 
   let subtitle: string;
   if (layout.kind === "sleeper") {

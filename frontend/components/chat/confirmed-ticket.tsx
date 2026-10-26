@@ -4,6 +4,7 @@ import React, { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Bus, Check, CheckCircle2, Copy, Printer } from "lucide-react";
+import { formatTime12h } from "@/lib/format-time";
 import type { ConfirmedTicketData } from "@/types/bus-booking";
 
 interface ConfirmedTicketProps {
@@ -121,7 +122,9 @@ export function ConfirmedTicket({ ticket, onBookAnother }: ConfirmedTicketProps)
               {ticket.origin || "—"}
             </div>
             <div className="mt-0.5 truncate text-xs text-muted-foreground">
-              {ticket.boarding_point ? `Boarding: ${ticket.boarding_point}` : "\u00A0"}
+              {ticket.boarding_point
+                ? `Boarding: ${ticket.boarding_point}${ticket.boarding_time ? ` · ${formatTime12h(ticket.boarding_time, ticket.boarding_day_offset)}` : ""}`
+                : "\u00A0"}
             </div>
           </div>
 
@@ -133,9 +136,6 @@ export function ConfirmedTicket({ ticket, onBookAnother }: ConfirmedTicketProps)
               <span className="h-px flex-1 border-t border-dashed border-muted-foreground/50" />
               <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
             </div>
-            <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-              Direct
-            </span>
           </div>
 
           <div className="min-w-0 text-right">
@@ -146,7 +146,9 @@ export function ConfirmedTicket({ ticket, onBookAnother }: ConfirmedTicketProps)
               {ticket.destination || "—"}
             </div>
             <div className="mt-0.5 truncate text-xs text-muted-foreground">
-              {ticket.dropping_point ? `Dropping: ${ticket.dropping_point}` : "\u00A0"}
+              {ticket.dropping_point
+                ? `Dropping: ${ticket.dropping_point}${ticket.dropping_time ? ` · ${formatTime12h(ticket.dropping_time, ticket.dropping_day_offset)}` : ""}`
+                : "\u00A0"}
             </div>
           </div>
         </div>

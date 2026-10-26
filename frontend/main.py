@@ -1,7 +1,7 @@
 import json
 import queue
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from typing import Any, Callable, Literal
 from uuid import UUID, uuid4
 
@@ -356,6 +356,53 @@ class FinalizePaymentRequest(BaseModel):
 
 
 GET_CONFIRMED_TICKET_SQL = """
+WITH raw_schedule_stops AS (
+    SELECT
+        ss.schedule_id,
+        rs.id AS route_stop_id,
+        rs.sequence_number,
+        ss.arrival_time,
+        ss.departure_time,
+        LAG(ss.departure_time) OVER (
+            PARTITION BY ss.schedule_id
+            ORDER BY rs.sequence_number
+        ) AS previous_departure_time
+    FROM schedule_stops ss
+    JOIN route_stops rs ON rs.id = ss.route_stop_id
+),
+schedule_stop_arrival_offsets AS (
+    SELECT
+        schedule_id,
+        route_stop_id,
+        sequence_number,
+        arrival_time,
+        departure_time,
+        SUM(
+            CASE
+                WHEN previous_departure_time IS NOT NULL
+                 AND arrival_time < previous_departure_time
+                THEN 1
+                ELSE 0
+            END
+        ) OVER (
+            PARTITION BY schedule_id
+            ORDER BY sequence_number
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS arrival_day_offset
+    FROM raw_schedule_stops
+),
+schedule_stop_offsets AS (
+    SELECT
+        schedule_id,
+        route_stop_id,
+        arrival_time,
+        departure_time,
+        arrival_day_offset,
+        arrival_day_offset
+            + CASE WHEN departure_time < arrival_time THEN 1 ELSE 0 END
+            AS departure_day_offset
+    FROM schedule_stop_arrival_offsets
+)
 SELECT
     b.booking_reference,
     b.status,
@@ -371,7 +418,11 @@ SELECT
     r.destination,
     s.travel_date,
     b_stop.stop_name AS boarding_point,
-    d_stop.stop_name AS dropping_point
+    d_stop.stop_name AS dropping_point,
+    boarding_schedule_stop.departure_time AS boarding_time,
+    boarding_schedule_stop.departure_day_offset AS boarding_day_offset,
+    dropping_schedule_stop.arrival_time AS dropping_time,
+    dropping_schedule_stop.arrival_day_offset AS dropping_day_offset
 FROM bookings b
 LEFT JOIN booking_seats bs ON bs.booking_id = b.id
 LEFT JOIN bus_seats seat ON seat.id = bs.seat_id
@@ -381,6 +432,12 @@ LEFT JOIN operators op ON op.id = bus.operator_id
 LEFT JOIN routes r ON r.id = s.route_id
 LEFT JOIN route_stops b_stop ON b_stop.id = b.boarding_stop_id
 LEFT JOIN route_stops d_stop ON d_stop.id = b.dropping_stop_id
+LEFT JOIN schedule_stop_offsets boarding_schedule_stop
+    ON boarding_schedule_stop.schedule_id = b.schedule_id
+   AND boarding_schedule_stop.route_stop_id = b.boarding_stop_id
+LEFT JOIN schedule_stop_offsets dropping_schedule_stop
+    ON dropping_schedule_stop.schedule_id = b.schedule_id
+   AND dropping_schedule_stop.route_stop_id = b.dropping_stop_id
 WHERE b.id = :booking_id
 LIMIT 1;
 """
@@ -404,6 +461,9 @@ def _get_confirmed_ticket_details(booking_id: UUID) -> dict | None:
                 data["total_amount"] = str(data["total_amount"])
             if data.get("travel_date") is not None:
                 data["travel_date"] = str(data["travel_date"])
+            for time_field in ("boarding_time", "dropping_time"):
+                if data.get(time_field) is not None:
+                    data[time_field] = str(data[time_field])
             return data
     except Exception:
         return None
@@ -780,6 +840,57 @@ def _build_agent_payload(
         response_payload["booking"] = booking_data
         msg_metadata["booking"] = booking_data
 
+    if booking_ctx.get("options_fresh") and not booking_ctx.get("booking_id"):
+        options_kind = booking_ctx.get("options_kind")
+        option_items = []
+
+        if options_kind == "bus":
+            for bus in booking_ctx.get("available_schedules", []):
+                label = (
+                    f"{bus['operator_name']} - {bus['bus_type']} "
+                    f"({bus['bus_number']})"
+                )
+                departure = _format_time_of_day(
+                    bus["departure_time"],
+                    bus["departure_day_offset"],
+                )
+                arrival = _format_time_of_day(
+                    bus["arrival_time"],
+                    bus["arrival_day_offset"],
+                )
+                option_items.append(
+                    {
+                        "label": label,
+                        "detail": (
+                            f"{departure} → {arrival} · ₹{bus['fare']} · "
+                            f"{bus['free_seats']} seats free"
+                        ),
+                    }
+                )
+        elif options_kind in {"boarding", "dropping"}:
+            stop_key = f"{options_kind}_stops"
+            time_key = "departure_time" if options_kind == "boarding" else "arrival_time"
+            offset_key = (
+                "departure_day_offset"
+                if options_kind == "boarding"
+                else "arrival_day_offset"
+            )
+            for stop in booking_ctx.get(stop_key, []):
+                option_items.append(
+                    {
+                        "label": stop["stop_name"],
+                        "detail": _format_time_of_day(
+                            stop[time_key],
+                            stop.get(offset_key, stop.get("day_offset", 0)),
+                        ),
+                    }
+                )
+
+        if option_items:
+            options = {"kind": options_kind, "items": option_items}
+            response_payload["options"] = options
+            msg_metadata["options"] = options
+
     boarding_stop_id = booking_ctx.get("boarding_stop_id")
     dropping_stop_id = booking_ctx.get("dropping_stop_id")
     current_segment = (
@@ -863,6 +974,14 @@ def _build_agent_payload(
         msg_metadata["payment_order"] = payment_order_data
 
     return response_payload, msg_metadata
+
+
+def _format_time_of_day(value: Any, day_offset: Any) -> str:
+    parsed_time = value if isinstance(value, time) else time.fromisoformat(str(value))
+    display = parsed_time.strftime("%I:%M %p").lstrip("0")
+    if int(day_offset) > 0:
+        display += " (next day)"
+    return display
 
 
 def _stream_agent_turn(

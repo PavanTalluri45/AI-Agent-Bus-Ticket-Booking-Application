@@ -54,7 +54,50 @@ SELECT
     bs.seat_number,
     bs.seat_type,
     bs.row_number,
-    bs.column_number
+    bs.column_number,
+    CASE
+        WHEN EXISTS (
+            SELECT 1
+            FROM booking_seats bks
+            JOIN bookings bk
+                ON bks.booking_id = bk.id
+            JOIN route_stops existing_boarding
+                ON bk.boarding_stop_id = existing_boarding.id
+            JOIN route_stops existing_dropping
+                ON bk.dropping_stop_id = existing_dropping.id
+            JOIN route_stops requested_boarding
+                ON requested_boarding.id = :boarding_stop_id
+            JOIN route_stops requested_dropping
+                ON requested_dropping.id = :dropping_stop_id
+            WHERE
+                bks.seat_id = bs.id
+                AND bk.schedule_id = s.id
+                AND bk.status = 'CONFIRMED'
+                AND existing_boarding.sequence_number
+                    < requested_dropping.sequence_number
+                AND existing_dropping.sequence_number
+                    > requested_boarding.sequence_number
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM seat_holds sh
+            JOIN route_stops requested_boarding
+                ON requested_boarding.id = :boarding_stop_id
+            JOIN route_stops requested_dropping
+                ON requested_dropping.id = :dropping_stop_id
+            WHERE
+                sh.schedule_id = s.id
+                AND sh.seat_id = bs.id
+                AND sh.status = 'ACTIVE'
+                AND sh.expires_at > NOW()
+                AND sh.boarding_sequence
+                    < requested_dropping.sequence_number
+                AND sh.dropping_sequence
+                    > requested_boarding.sequence_number
+        )
+        THEN 'unavailable'
+        ELSE 'available'
+    END AS status
 
 FROM schedules s
 
@@ -67,37 +110,6 @@ JOIN bus_seats bs
 WHERE
     s.id = :schedule_id
     AND bs.is_active = TRUE
-
-    AND NOT EXISTS (
-        SELECT 1
-        FROM booking_seats bks
-
-        JOIN bookings bk
-            ON bks.booking_id = bk.id
-
-        JOIN route_stops existing_boarding
-            ON bk.boarding_stop_id = existing_boarding.id
-
-        JOIN route_stops existing_dropping
-            ON bk.dropping_stop_id = existing_dropping.id
-
-        JOIN route_stops requested_boarding
-            ON requested_boarding.id = :boarding_stop_id
-
-        JOIN route_stops requested_dropping
-            ON requested_dropping.id = :dropping_stop_id
-
-        WHERE
-            bks.seat_id = bs.id
-            AND bk.schedule_id = s.id
-            AND bk.status = 'CONFIRMED'
-
-            AND existing_boarding.sequence_number
-                < requested_dropping.sequence_number
-
-            AND existing_dropping.sequence_number
-                > requested_boarding.sequence_number
-    )
 
 ORDER BY
     bs.row_number,

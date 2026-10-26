@@ -115,9 +115,38 @@ def base_booking_context() -> BookingContext:
         "dropping_stop_id": DROPPING_STOP_ID,
         "dropping_stop_name": "Chennai",
         "available_seats": [
-            {"seat_id": SEAT_ID, "seat_number": "1B", "seat_type": "SEATER"},
-            {"seat_id": ALT_SEAT_ID, "seat_number": "1A", "seat_type": "SEATER"},
+            {
+                "seat_id": SEAT_ID,
+                "seat_number": "1B",
+                "seat_type": "SEATER",
+                "status": "available",
+            },
+            {
+                "seat_id": ALT_SEAT_ID,
+                "seat_number": "1A",
+                "seat_type": "SEATER",
+                "status": "available",
+            },
         ],
+        "seat_map": [
+            {
+                "seat_id": SEAT_ID,
+                "seat_number": "1B",
+                "seat_type": "SEATER",
+                "row_number": 1,
+                "column_number": 2,
+                "status": "available",
+            },
+            {
+                "seat_id": ALT_SEAT_ID,
+                "seat_number": "1A",
+                "seat_type": "SEATER",
+                "row_number": 1,
+                "column_number": 1,
+                "status": "available",
+            },
+        ],
+        "seat_map_segment": f"{BOARDING_STOP_ID}:{DROPPING_STOP_ID}",
     }
 
 
@@ -326,8 +355,22 @@ def test_availability_persistence_updates_authoritative_journey_context(base_boo
     """Seat availability must persist the selected journey IDs and clear stale seat picks."""
     availability_result = {
         "result": [
-            {"seat_id": SEAT_ID, "seat_number": SEAT_NUMBER, "seat_type": "SEATER"},
-            {"seat_id": ALT_SEAT_ID, "seat_number": ALT_SEAT_NUMBER, "seat_type": "SEATER"},
+            {
+                "seat_id": SEAT_ID,
+                "seat_number": SEAT_NUMBER,
+                "seat_type": "SEATER",
+                "row_number": 1,
+                "column_number": 2,
+                "status": "available",
+            },
+            {
+                "seat_id": ALT_SEAT_ID,
+                "seat_number": ALT_SEAT_NUMBER,
+                "seat_type": "SEATER",
+                "row_number": 1,
+                "column_number": 1,
+                "status": "unavailable",
+            },
         ]
     }
     context = base_booking_context.copy()
@@ -348,9 +391,115 @@ def test_availability_persistence_updates_authoritative_journey_context(base_boo
     assert updated["schedule_id"] == SCHEDULE_ID
     assert updated["boarding_stop_id"] == BOARDING_STOP_ID
     assert updated["dropping_stop_id"] == DROPPING_STOP_ID
-    assert updated["available_seats"] == availability_result["result"]
+    assert updated["available_seats"] == [availability_result["result"][0]]
+    assert updated["seat_map"] == availability_result["result"]
+    assert updated["seat_map_segment"] == f"{BOARDING_STOP_ID}:{DROPPING_STOP_ID}"
+    assert updated["seat_map_fresh"] is True
     assert updated.get("seat_id") is None
     assert updated.get("seat_number") is None
+
+
+def test_unavailable_seat_cannot_be_resolved_from_its_exact_label(base_booking_context):
+    """A blocked seat stays in the map but cannot become an agent-resolved selection."""
+    context = base_booking_context.copy()
+    context["available_seats"] = [
+        {
+            "seat_id": SEAT_ID,
+            "seat_number": SEAT_NUMBER,
+            "seat_type": "SEATER",
+            "status": "available",
+        }
+    ]
+    context["seat_map"] = [
+        {
+            "seat_id": SEAT_ID,
+            "seat_number": SEAT_NUMBER,
+            "seat_type": "SEATER",
+            "status": "unavailable",
+        },
+        {
+            "seat_id": ALT_SEAT_ID,
+            "seat_number": ALT_SEAT_NUMBER,
+            "seat_type": "SEATER",
+            "status": "available",
+        },
+    ]
+
+    resolved = resolve_booking_context(context, "I want seat 1B")
+
+    assert resolved.get("seat_id") is None
+    assert resolved.get("seat_number") is None
+
+
+def test_journey_change_clears_seat_map_and_candidates(base_booking_context):
+    changed_boarding_id = "00000000-0000-0000-0000-000000000099"
+    context = base_booking_context.copy()
+    context["boarding_stops"] = [
+        {"stop_id": BOARDING_STOP_ID, "stop_name": "Bangalore"},
+        {"stop_id": changed_boarding_id, "stop_name": "Bangalore East"},
+    ]
+    context["dropping_stops"] = [
+        {"stop_id": DROPPING_STOP_ID, "stop_name": "Chennai"},
+    ]
+
+    resolved = resolve_booking_context(
+        context,
+        "Board at Bangalore East and drop at Chennai",
+    )
+
+    assert resolved["boarding_stop_id"] == changed_boarding_id
+    assert resolved["dropping_stop_id"] == DROPPING_STOP_ID
+    assert "available_seats" not in resolved
+    assert "seat_map" not in resolved
+    assert "seat_map_segment" not in resolved
+    assert "seat_id" not in resolved
+
+
+def test_new_search_clears_previous_seat_map_and_candidates(base_booking_context):
+    updated = update_booking_context_from_tool_result(
+        context=base_booking_context,
+        tool_name="search_buses",
+        tool_result={"result": []},
+    )
+
+    assert "available_seats" not in updated
+    assert "seat_map" not in updated
+    assert "seat_map_segment" not in updated
+
+
+def test_gemini_receives_available_seats_only(base_booking_context):
+    """Full map data never enters Gemini context or the availability tool continuation."""
+    from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
+        build_llm_input,
+        serialize_tool_result_for_llm,
+    )
+
+    context = base_booking_context.copy()
+    context["seat_map"] = [
+        {"seat_number": "1B", "status": "unavailable"},
+    ]
+    llm_context = build_llm_input(
+        {
+            "memories": [],
+            "booking_context": context,
+            "user_message": "Check my options",
+        }
+    )
+    assert '"seat_map"' not in llm_context
+    assert '"seat_map_segment"' not in llm_context
+    assert '"seat_map_fresh"' not in llm_context
+
+    serialized_result = serialize_tool_result_for_llm(
+        {
+            "result": [
+                {"seat_number": "1A", "status": "available"},
+                {"seat_number": "1B", "status": "unavailable"},
+            ]
+        },
+        tool_name="check_seat_availability",
+    )
+    assert '"seat_number": "1A"' in serialized_result
+    assert '"seat_number": "1B"' not in serialized_result
 
 
 def test_selected_schedule_details_load_stop_options(monkeypatch):
@@ -385,8 +534,9 @@ def test_selected_schedule_details_load_stop_options(monkeypatch):
     assert hydrated["dropping_stops"] == [
         {"stop_id": DROPPING_STOP_ID, "stop_name": "Bangalore"},
     ]
-    assert "Boarding stops: Hyderabad" in format_stop_selection_prompt(hydrated)
-    assert "Drop-off stops: Bangalore" in format_stop_selection_prompt(hydrated)
+    assert format_stop_selection_prompt(hydrated) == (
+        "Choose your boarding and drop-off stops below to continue."
+    )
 
 
 def test_switching_schedules_clears_previous_route_choices():
@@ -402,6 +552,8 @@ def test_switching_schedules_clears_previous_route_choices():
             {"stop_id": DROPPING_STOP_ID, "stop_name": "Old drop-off point"},
         ],
         "available_seats": [{"seat_id": SEAT_ID, "seat_number": SEAT_NUMBER}],
+        "seat_map": [{"seat_id": SEAT_ID, "seat_number": SEAT_NUMBER}],
+        "seat_map_segment": f"{BOARDING_STOP_ID}:{DROPPING_STOP_ID}",
         "seat_id": SEAT_ID,
         "seat_number": SEAT_NUMBER,
         "available_schedules": [
@@ -421,6 +573,8 @@ def test_switching_schedules_clears_previous_route_choices():
     assert "boarding_stop_id" not in resolved
     assert "dropping_stop_id" not in resolved
     assert "available_seats" not in resolved
+    assert "seat_map" not in resolved
+    assert "seat_map_segment" not in resolved
     assert "seat_id" not in resolved
 
 
@@ -482,8 +636,9 @@ def test_availability_request_without_stop_selection_asks_user(monkeypatch):
 
     assert not result["error"]
     assert not result["tool_name"]
-    assert "Boarding stops: Hyderabad" in result["final_response"]
-    assert "Drop-off stops: Bangalore" in result["final_response"]
+    assert result["final_response"] == (
+        "Choose your boarding and drop-off stops below to continue."
+    )
     assert result["booking_context"]["boarding_stops"]
 
 
@@ -641,8 +796,8 @@ def test_stop_resolution_prefers_specific_longer_stop_name():
     assert resolved.get("dropping_stop_id") == DROPPING_STOP_ID
 
 
-def test_partial_stop_selection_prompts_only_for_missing_stop():
-    """When one stop is already resolved, format_stop_selection_prompt asks only for the other."""
+def test_partial_stop_selection_does_not_repeat_stop_options():
+    """Combined stop options are prompted without repeating the stop names."""
     from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
         format_stop_selection_prompt,
     )
@@ -653,10 +808,9 @@ def test_partial_stop_selection_prompts_only_for_missing_stop():
         "dropping_stops": [{"stop_id": DROPPING_STOP_ID, "stop_name": "Chennai"}],
     }
     prompt = format_stop_selection_prompt(context_with_boarding)
-    assert "Boarding stop is set to Bangalore" in prompt
-    assert "Please choose your dropping stop" in prompt
-    assert "Drop-off stops: Chennai" in prompt
-    assert "Boarding stops:" not in prompt
+    assert prompt == "Choose your boarding and drop-off stops below to continue."
+    assert "Bangalore" not in prompt
+    assert "Chennai" not in prompt
 
 
 def test_stop_resolution_after_clarification_continues_flow():
@@ -668,8 +822,8 @@ def test_stop_resolution_after_clarification_continues_flow():
     assert resolved.get("dropping_stop_id") == DROPPING_STOP_ID
 
 
-def test_format_stop_selection_prompt_no_longer_shows_only_one_format():
-    """The stop-selection prompt should no longer funnel users into a single syntax."""
+def test_format_stop_selection_prompt_does_not_repeat_options():
+    """The stop-selection prompt directs users to the combined picker."""
     from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
         format_stop_selection_prompt,
     )
@@ -678,10 +832,9 @@ def test_format_stop_selection_prompt_no_longer_shows_only_one_format():
         "dropping_stops": [{"stop_name": "Chennai"}],
     }
     prompt = format_stop_selection_prompt(context)
-    # The old rigid example "Board from <stop> and drop at <stop>." must be gone
-    assert "board from <stop> and drop at <stop>" not in prompt.lower()
-    # New prompt should mention multiple examples or "From <stop> to <stop>"
-    assert "from" in prompt.lower() and "to" in prompt.lower()
+    assert prompt == "Choose your boarding and drop-off stops below to continue."
+    assert "Bangalore" not in prompt
+    assert "Chennai" not in prompt
 
 
 def test_stop_resolution_unrelated_flow_unaffected():
