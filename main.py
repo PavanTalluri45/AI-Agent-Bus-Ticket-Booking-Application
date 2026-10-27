@@ -856,12 +856,16 @@ def _build_agent_payload(
                 arrival = bus.get("arrival_display") or _format_time_of_day(
                     bus["arrival_time"], bus["arrival_day_offset"]
                 )
+                free_seat_count = bus.get(
+                    "free_seat_count",
+                    bus.get("free_seats", 0),
+                )
                 option_items.append(
                     {
                         "label": label,
                         "detail": (
                             f"{departure} → {arrival} · ₹{bus['fare']} · "
-                            f"{bus['free_seats']} seats free"
+                            f"{free_seat_count} available seats"
                         ),
                     }
                 )

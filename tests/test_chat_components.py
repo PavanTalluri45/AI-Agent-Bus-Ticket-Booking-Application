@@ -164,11 +164,11 @@ def rendered_components():
                 "items": [
                     {
                         "label": "YBM Travels - AC Seater (KA01AB1234)",
-                        "detail": "10:15 PM → 1:00 AM (next day) · ₹350.00 · 7 seats free",
+                        "detail": "10:15 PM → 1:00 AM (next day) · ₹350.00 · 7 available seats",
                     },
                     {
                         "label": "SRS Travels - Volvo AC (KA02CD5678)",
-                        "detail": "9:30 PM → 12:30 AM (next day) · ₹450.00 · 3 seats free",
+                        "detail": "9:30 PM → 12:30 AM (next day) · ₹450.00 · 3 available seats",
                     },
                 ],
             },
@@ -319,7 +319,7 @@ def test_selection_options_render_accessible_buttons(rendered_components):
     assert html.count("<button") == 2
     assert 'aria-label="Select bus: YBM Travels - AC Seater (KA01AB1234)' in html
     assert "10:15 PM" in html
-    assert "7 seats free" in html
+    assert "7 available seats" in html
     assert "schedule-id" not in html
 
 
@@ -336,8 +336,10 @@ def test_combined_stop_picker_renders_both_columns_and_sequences(
     html = rendered_components["stopOptionsHtml"]
     assert "Boarding" in html
     assert "Dropping" in html
-    assert "Stop 1 · 10:15 PM" in html
-    assert "Stop 3 · 6:30 AM (next day)" in html
+    assert "10:15 PM" in html
+    assert "Stop 1" not in html
+    assert "6:30 AM (next day)" in html
+    assert "Stop 3" not in html
     assert 'aria-label="Continue with selected stops"' in html
     assert "Boarding stop: " not in html
 
@@ -351,9 +353,9 @@ def test_stop_pair_disabling_follows_sequence_order(rendered_components):
         tag for tag in boarding_selected_tags if "Select dropping stop" in tag
     ]
     assert len(dropping_candidates) == 3
-    assert re.search(r"\sdisabled(?:=\"\")?(?=[ >])", dropping_candidates[0])
-    assert re.search(r"\sdisabled(?:=\"\")?(?=[ >])", dropping_candidates[1])
-    assert not re.search(r"\sdisabled(?:=\"\")?(?=[ >])", dropping_candidates[2])
+    assert 'aria-disabled="true"' in dropping_candidates[0]
+    assert 'aria-disabled="true"' in dropping_candidates[1]
+    assert 'aria-disabled="true"' not in dropping_candidates[2]
 
     dropping_selected_tags = re.findall(
         r"<button\b[^>]*>",
@@ -363,9 +365,9 @@ def test_stop_pair_disabling_follows_sequence_order(rendered_components):
         tag for tag in dropping_selected_tags if "Select boarding stop" in tag
     ]
     assert len(boarding_candidates) == 3
-    assert not re.search(r"\sdisabled(?:=\"\")?(?=[ >])", boarding_candidates[0])
-    assert re.search(r"\sdisabled(?:=\"\")?(?=[ >])", boarding_candidates[1])
-    assert re.search(r"\sdisabled(?:=\"\")?(?=[ >])", boarding_candidates[2])
+    assert 'aria-disabled="true"' not in boarding_candidates[0]
+    assert 'aria-disabled="true"' in boarding_candidates[1]
+    assert 'aria-disabled="true"' in boarding_candidates[2]
 
 
 def test_selected_seat_map_renders_collapsed_and_locks_change_button(

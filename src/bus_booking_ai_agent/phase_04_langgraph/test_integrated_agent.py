@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import atexit
 import json
 import os
@@ -119,7 +119,7 @@ Follow these rules at all times:
 15. A selected schedule_id in booking_context is the authoritative selected bus for the current booking flow. Never replace it with another schedule unless the user explicitly selects another bus.
 16. If booking_context already contains details for the selected schedule, use those details instead of calling get_bus_details again.
 17. Never call get_bus_details for a schedule different from the selected schedule.
-18. Seat availability is specific to a journey segment. Before checking it, make sure the user has selected both a boarding stop and a dropping stop from the selected schedule's details. If either is missing, ask the user to choose from the returned stop names; never choose stops on the user's behalf.
+18. Seat availability is specific to a journey segment. Before checking it, make sure both a boarding stop and a dropping stop are selected (either chosen by the user or pre-selected from a segment search). If either is missing, ask the user to choose from the returned stop names; never choose stops on the user's behalf. When both boarding and dropping stops are already present in booking_context, call check_seat_availability directly.
 19. Selecting a seat is not the same as creating a booking. Never say that a booking is confirmed unless a real booking operation has executed and returned confirmed booking state.
 20. If a seat has not been deterministically resolved by application state, never claim that the seat is selected.
 21. When a seat is selected, describe it as selected only. Do not claim a hold, booking, payment, or confirmation unless the corresponding real operation returned that state.
@@ -134,12 +134,14 @@ Follow these rules at all times:
 30. After a booking is created and payment order is returned, inform the user of their booking reference and the total amount. Do not reveal internal UUIDs or payment order IDs to the user.
 31. Do not ask redundant confirmation questions before calling create_payment_pending_booking when all passenger details have been provided and the user confirms they want to book. The application workflow manages human approval directly.
 32. Keep replies short. When several details are needed, ask for all of them in one message.
-33. total_seats is bus capacity, never seat availability. Use free_seats for availability.
-34. When listing buses, show operator, bus type, departure and arrival time, fare, and seats free.
+33. total_seats is bus capacity, never seat availability. Use free_seat_count / free_seats for available seats.
+34. When listing buses, show operator, bus type, departure and arrival time, fare, and available seats.
 35. Copy the *_display time strings from tool results exactly. Never convert, reformat, or calculate a time yourself.
 36. The display strings already use 12-hour time without seconds, and include "(next day)" only when the corresponding day offset is greater than 0. Do not add or remove that suffix.
 37. When tappable bus or stop options are shown by the application, do not list the options again in response text. Write one short sentence directing the user to the options.
 38. Show hold expiry exactly as the application provides it. Never convert it or show UTC.
+39. When the interactive seat map is shown by the application, write one short sentence directing the user to pick a seat on the map (e.g. "Pick a seat on the map below to continue."). Never list, describe, or recommend individual seat numbers or seat availability in response text.
+40. You can search for buses between any two route stops by passing their stop names as origin and destination to search_buses. If search_buses returns no results, inform the user that no buses were found for those stops and ask which stops they would like to search.
 """
 
 IST = timezone(timedelta(hours=5, minutes=30), "IST")
@@ -335,19 +337,19 @@ TOOLS = [
         "type": "function",
         "name": "search_buses",
         "description": (
-            "Search scheduled buses between an origin and destination "
-            "for a specific travel date."
+            "Search scheduled buses between any two route stops "
+            "(origin and destination) for a specific travel date."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "origin": {
                     "type": "string",
-                    "description": "Departure city.",
+                    "description": "Departure city or boarding stop name.",
                 },
                 "destination": {
                     "type": "string",
-                    "description": "Destination city.",
+                    "description": "Destination city or dropping stop name.",
                 },
                 "travel_date": {
                     "type": "string",
@@ -1137,6 +1139,29 @@ def _resolve_selected_bus(
             value = selected.get(key)
             if value is not None:
                 resolved[key] = str(value)
+
+        # Auto-set stops on selection if selected from a segment search result
+        if selected.get("is_segment_search") or (
+            selected.get("boarding_stop_id")
+            and selected.get("dropping_stop_id")
+            and (
+                selected.get("boarding_stop_name") != selected.get("route_origin")
+                or selected.get("dropping_stop_name") != selected.get("route_destination")
+            )
+        ):
+            if selected.get("boarding_stop_id"):
+                resolved["boarding_stop_id"] = str(selected["boarding_stop_id"])
+            if selected.get("boarding_stop_name"):
+                resolved["boarding_stop_name"] = str(selected["boarding_stop_name"])
+            if selected.get("dropping_stop_id"):
+                resolved["dropping_stop_id"] = str(selected["dropping_stop_id"])
+            if selected.get("dropping_stop_name"):
+                resolved["dropping_stop_name"] = str(selected["dropping_stop_name"])
+            if selected.get("fare"):
+                resolved["fare"] = str(selected["fare"])
+            resolved.pop("options_kind", None)
+            resolved.pop("options_fresh", None)
+
         return resolved
 
     # Explicit ordinal selections such as "first bus" or "option 2".

@@ -44,6 +44,7 @@ export function SelectionOptions({
       ? options.dropping.find((item) => item.selected)?.sequence_number ?? null
       : null,
   );
+  const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
 
   if (options.kind === "bus") {
     return (
@@ -71,6 +72,15 @@ export function SelectionOptions({
     );
   }
 
+  const selectedBoarding =
+    options.boarding.find(
+      (stop) => stop.sequence_number === selectedBoardingSequence,
+    ) ?? null;
+  const selectedDropping =
+    options.dropping.find(
+      (stop) => stop.sequence_number === selectedDroppingSequence,
+    ) ?? null;
+
   const renderStopColumn = (
     label: string,
     stops: StopSelectionOptionItem[],
@@ -94,17 +104,44 @@ export function SelectionOptions({
             <button
               key={`${stop.sequence_number}-${stop.label}-${index}`}
               type="button"
-              aria-label={`Select ${isBoarding ? "boarding" : "dropping"} stop ${stop.label}, Stop ${stop.sequence_number}, ${stop.display_time}`}
+              aria-label={`Select ${isBoarding ? "boarding" : "dropping"} stop ${stop.label}, ${stop.display_time}`}
               aria-pressed={selected}
-              disabled={!interactive || pairIsInvalid}
-              onClick={() => onSelectStop(stop.sequence_number)}
-              className={`w-full rounded-xl border px-3 py-2 text-left text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60 ${
-                selected ? "border-primary bg-primary/5" : "border-border bg-background"
+              aria-disabled={pairIsInvalid}
+              disabled={!interactive}
+              onClick={() => {
+                if (!interactive) return;
+                if (pairIsInvalid) {
+                  if (isBoarding) {
+                    const targetDropping = options.dropping.find(
+                      (item) => item.sequence_number === otherSequence,
+                    );
+                    setFeedbackMessage(
+                      `Choose a boarding stop before ${targetDropping?.label || "dropping stop"}`,
+                    );
+                  } else {
+                    const targetBoarding = options.boarding.find(
+                      (item) => item.sequence_number === otherSequence,
+                    );
+                    setFeedbackMessage(
+                      `Choose a dropping stop after ${targetBoarding?.label || "boarding stop"}`,
+                    );
+                  }
+                  return;
+                }
+                setFeedbackMessage(null);
+                onSelectStop(stop.sequence_number);
+              }}
+              className={`w-full rounded-xl border px-3 py-2 text-left text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-60 ${
+                pairIsInvalid
+                  ? "cursor-not-allowed opacity-50 border-border bg-background"
+                  : selected
+                    ? "border-primary bg-primary/5 hover:bg-primary/10"
+                    : "border-border bg-background hover:bg-muted"
               }`}
             >
               <span className="block text-sm font-medium">{stop.label}</span>
               <span className="mt-0.5 block text-xs text-muted-foreground">
-                Stop {stop.sequence_number} · {stop.display_time}
+                {stop.display_time}
               </span>
             </button>
           );
@@ -113,17 +150,25 @@ export function SelectionOptions({
     </div>
   );
 
-  const selectedBoarding =
-    options.boarding.find(
-      (stop) => stop.sequence_number === selectedBoardingSequence,
-    ) ?? null;
-  const selectedDropping =
-    options.dropping.find(
-      (stop) => stop.sequence_number === selectedDroppingSequence,
-    ) ?? null;
-
   return (
     <div className="mt-2 flex w-full max-w-md flex-col gap-3">
+      {feedbackMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex items-center justify-between rounded-xl border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+        >
+          <span>{feedbackMessage}</span>
+          <button
+            type="button"
+            aria-label="Dismiss feedback message"
+            onClick={() => setFeedbackMessage(null)}
+            className="ml-2 rounded p-0.5 hover:bg-destructive/20"
+          >
+            ✕
+          </button>
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-3">
         {renderStopColumn(
           "Boarding",

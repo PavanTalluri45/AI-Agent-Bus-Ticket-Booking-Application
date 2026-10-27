@@ -52,7 +52,7 @@ def test_bus_options_payload_has_details_without_ids_and_only_when_fresh():
         "items": [
             {
                 "label": "YBM Travels - AC Seater (KA01AB1234)",
-                "detail": "10:15 PM → 1:00 AM (next day) · ₹350.00 · 7 seats free",
+                "detail": "10:15 PM → 1:00 AM (next day) · ₹350.00 · 7 available seats",
             }
         ],
     }

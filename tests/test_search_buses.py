@@ -52,6 +52,11 @@ def test_search_buses_returns_exact_overnight_display_times(monkeypatch):
             yield FakeConnection()
 
     monkeypatch.setattr(search_buses_module, "engine", FakeEngine())
+    monkeypatch.setattr(
+        search_buses_module,
+        "get_current_time",
+        lambda: datetime(2026, 10, 26, 12, 0, tzinfo=timezone(timedelta(hours=5, minutes=30))),
+    )
     results = search_buses_module.search_buses(
         SearchBusesInput(
             origin="Hyderabad",
@@ -112,6 +117,7 @@ def test_search_buses_returns_route_data_and_excludes_overlapping_seats(
                    AND fare.dropping_stop_id = dropping.id
                    AND fare.is_active = TRUE
                 WHERE s.status = 'SCHEDULED'
+                  AND s.travel_date >= CURRENT_DATE + INTERVAL '1 day'
                 ORDER BY s.travel_date, r.origin, r.destination
                 """
             )
