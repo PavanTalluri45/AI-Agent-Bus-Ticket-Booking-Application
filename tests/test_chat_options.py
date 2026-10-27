@@ -7,6 +7,8 @@ from uuid import uuid4
 from main import _build_agent_payload
 import bus_booking_ai_agent.phase_03_mcp.tools.get_bus_details as get_bus_details_module
 from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
+    AGENT_SYSTEM_INSTRUCTION,
+    BookingContext,
     resolve_booking_context,
     update_booking_context_from_tool_result,
 )
@@ -113,8 +115,8 @@ def test_combined_stop_options_resolve_both_stops_and_use_display_times():
         {"result": details},
     )
 
-    assert context["options_kind"] == "stops"
-    assert context["options_fresh"] is True
+    assert context.get("options_kind") == "stops"
+    assert context.get("options_fresh") is True
 
     payload, metadata = _build_agent_payload(
         {
@@ -151,14 +153,14 @@ def test_combined_stop_options_resolve_both_stops_and_use_display_times():
         context,
         "Boarding stop: Hyderabad, Dropping stop: Chennai",
     )
-    assert selected["boarding_stop_id"] == boarding_id
-    assert selected["dropping_stop_id"] == dropping_id
+    assert selected.get("boarding_stop_id") == boarding_id
+    assert selected.get("dropping_stop_id") == dropping_id
     assert "options_kind" not in selected
     assert "options_fresh" not in selected
 
 
 def test_stop_pair_resolution_rejects_non_increasing_sequences():
-    context = {
+    context: BookingContext = {
         "boarding_stops": [
             {
                 "stop_id": "later",
@@ -182,6 +184,102 @@ def test_stop_pair_resolution_rejects_non_increasing_sequences():
 
     assert "boarding_stop_id" not in resolved
     assert "dropping_stop_id" not in resolved
+
+
+def test_full_route_bus_selection_resolves_search_stops_without_picker():
+    boarding_id = str(uuid4())
+    dropping_id = str(uuid4())
+    context: BookingContext = {
+        "options_kind": "bus",
+        "options_fresh": True,
+        "available_schedules": [
+            {
+                "schedule_id": str(uuid4()),
+                "boarding_stop_id": boarding_id,
+                "boarding_stop_name": "Hyderabad",
+                "dropping_stop_id": dropping_id,
+                "dropping_stop_name": "Bangalore",
+                "route_origin": "Hyderabad",
+                "route_destination": "Bangalore",
+                "is_segment_search": False,
+            }
+        ],
+    }
+
+    selected = resolve_booking_context(context, "Select option 1")
+
+    assert selected.get("boarding_stop_id") == boarding_id
+    assert selected.get("dropping_stop_id") == dropping_id
+    assert selected.get("boarding_stop_name") == "Hyderabad"
+    assert selected.get("dropping_stop_name") == "Bangalore"
+    assert "options_kind" not in selected
+    assert "options_fresh" not in selected
+
+
+def test_change_stops_clears_selected_segment_and_shows_picker():
+    context: BookingContext = {
+        "schedule_id": str(uuid4()),
+        "boarding_stop_id": str(uuid4()),
+        "boarding_stop_name": "Hyderabad",
+        "dropping_stop_id": str(uuid4()),
+        "dropping_stop_name": "Bangalore",
+        "boarding_stops": [
+            {
+                "stop_id": str(uuid4()),
+                "stop_name": "Hyderabad",
+                "sequence_number": 1,
+                "departure_time": "08:00:00",
+            },
+            {
+                "stop_id": str(uuid4()),
+                "stop_name": "Kurnool",
+                "sequence_number": 2,
+                "departure_time": "10:00:00",
+            },
+        ],
+        "dropping_stops": [
+            {
+                "stop_id": str(uuid4()),
+                "stop_name": "Bangalore",
+                "sequence_number": 4,
+                "arrival_time": "15:00:00",
+            },
+            {
+                "stop_id": str(uuid4()),
+                "stop_name": "Anantapur",
+                "sequence_number": 3,
+                "arrival_time": "12:00:00",
+            },
+        ],
+        "seat_map": [{"seat_number": "1A"}],
+        "seat_map_segment": "old-segment",
+        "seat_id": str(uuid4()),
+        "seat_number": "1A",
+    }
+
+    resolved = resolve_booking_context(context, "Change stops")
+
+    assert "boarding_stop_id" not in resolved
+    assert "boarding_stop_name" not in resolved
+    assert "dropping_stop_id" not in resolved
+    assert "dropping_stop_name" not in resolved
+    assert "seat_map" not in resolved
+    assert "seat_id" not in resolved
+    assert "seat_number" not in resolved
+    assert resolved.get("options_kind") == "stops"
+    assert resolved.get("options_fresh") is True
+
+    payload, metadata = _build_agent_payload(
+        {"final_response": "Choose your stops below.", "booking_context": resolved},
+        "conversation-id",
+    )
+    assert payload["options"]["kind"] == "stops"
+    assert metadata["options"] == payload["options"]
+
+
+def test_system_prompt_formats_user_facing_currency_with_rupee_symbol():
+    assert "put the ₹ symbol immediately before the amount" in AGENT_SYSTEM_INSTRUCTION
+    assert "Never write INR or another currency code" in AGENT_SYSTEM_INSTRUCTION
 
 
 def test_get_bus_details_adds_display_times_from_stop_offsets(monkeypatch):
@@ -252,5 +350,5 @@ def test_search_results_mark_bus_options_fresh():
         {"result": [{"schedule_id": str(uuid4())}]},
     )
 
-    assert context["options_kind"] == "bus"
-    assert context["options_fresh"] is True
+    assert context.get("options_kind") == "bus"
+    assert context.get("options_fresh") is True

@@ -119,7 +119,7 @@ Follow these rules at all times:
 15. A selected schedule_id in booking_context is the authoritative selected bus for the current booking flow. Never replace it with another schedule unless the user explicitly selects another bus.
 16. If booking_context already contains details for the selected schedule, use those details instead of calling get_bus_details again.
 17. Never call get_bus_details for a schedule different from the selected schedule.
-18. Seat availability is specific to a journey segment. Before checking it, make sure both a boarding stop and a dropping stop are selected (either chosen by the user or pre-selected from a segment search). If either is missing, ask the user to choose from the returned stop names; never choose stops on the user's behalf. When both boarding and dropping stops are already present in booking_context, call check_seat_availability directly.
+18. Seat availability is specific to a journey segment. Before checking it, make sure both a boarding stop and a dropping stop are selected (either chosen by the user or pre-selected from the search result). If either is missing, ask the user to choose from the returned stop names; never choose stops on the user's behalf. When both boarding and dropping stops are already present in booking_context, call check_seat_availability directly.
 19. Selecting a seat is not the same as creating a booking. Never say that a booking is confirmed unless a real booking operation has executed and returned confirmed booking state.
 20. If a seat has not been deterministically resolved by application state, never claim that the seat is selected.
 21. When a seat is selected, describe it as selected only. Do not claim a hold, booking, payment, or confirmation unless the corresponding real operation returned that state.
@@ -142,6 +142,7 @@ Follow these rules at all times:
 38. Show hold expiry exactly as the application provides it. Never convert it or show UTC.
 39. When the interactive seat map is shown by the application, write one short sentence directing the user to pick a seat on the map (e.g. "Pick a seat on the map below to continue."). Never list, describe, or recommend individual seat numbers or seat availability in response text.
 40. You can search for buses between any two route stops by passing their stop names as origin and destination to search_buses. If search_buses returns no results, inform the user that no buses were found for those stops and ask which stops they would like to search.
+41. For every user-facing fare or payment amount, put the ₹ symbol immediately before the amount. Never write INR or another currency code in place of the ₹ symbol.
 """
 
 IST = timezone(timedelta(hours=5, minutes=30), "IST")
@@ -198,6 +199,7 @@ class BookingContext(TypedDict, total=False):
     bus_number: str
     operator_name: str
     bus_type: str
+    fare: str
     boarding_stop_id: str
     boarding_stop_name: str
     dropping_stop_id: str
@@ -1092,6 +1094,21 @@ def _normalize_selection_text(value: str) -> str:
     return " ".join(value.lower().replace("-", " ").split())
 
 
+def _is_change_stops_request(user_message: str) -> bool:
+    message = _normalize_selection_text(user_message)
+    return any(
+        phrase in message
+        for phrase in (
+            "change stop",
+            "change boarding",
+            "change dropping",
+            "change drop off",
+            "pick different stops",
+            "choose different stops",
+        )
+    )
+
+
 def _resolve_selected_bus(
     context: BookingContext,
     user_message: str,
@@ -1140,21 +1157,13 @@ def _resolve_selected_bus(
             if value is not None:
                 resolved[key] = str(value)
 
-        # Auto-set stops on selection if selected from a segment search result
-        if selected.get("is_segment_search") or (
-            selected.get("boarding_stop_id")
-            and selected.get("dropping_stop_id")
-            and (
-                selected.get("boarding_stop_name") != selected.get("route_origin")
-                or selected.get("dropping_stop_name") != selected.get("route_destination")
-            )
-        ):
-            if selected.get("boarding_stop_id"):
-                resolved["boarding_stop_id"] = str(selected["boarding_stop_id"])
+        # Search results contain the authoritative stops for both full-route
+        # and segment searches, so selecting a bus also selects that segment.
+        if selected.get("boarding_stop_id") and selected.get("dropping_stop_id"):
+            resolved["boarding_stop_id"] = str(selected["boarding_stop_id"])
+            resolved["dropping_stop_id"] = str(selected["dropping_stop_id"])
             if selected.get("boarding_stop_name"):
                 resolved["boarding_stop_name"] = str(selected["boarding_stop_name"])
-            if selected.get("dropping_stop_id"):
-                resolved["dropping_stop_id"] = str(selected["dropping_stop_id"])
             if selected.get("dropping_stop_name"):
                 resolved["dropping_stop_name"] = str(selected["dropping_stop_name"])
             if selected.get("fare"):
@@ -1501,6 +1510,33 @@ def resolve_booking_context(
     user_message: str,
 ) -> BookingContext:
     """Resolve only unambiguous human selections from authoritative state."""
+    if (
+        _is_change_stops_request(user_message)
+        and not context.get("hold_id")
+        and not context.get("booking_id")
+        and not context.get("payment_order_id")
+    ):
+        resolved = context.copy()
+        for key in (
+            "boarding_stop_id",
+            "boarding_stop_name",
+            "dropping_stop_id",
+            "dropping_stop_name",
+            "available_seats",
+            "seat_map",
+            "seat_map_segment",
+            "seat_map_fresh",
+            "options_kind",
+            "options_fresh",
+            "seat_id",
+            "seat_number",
+        ):
+            resolved.pop(key, None)
+        if resolved.get("boarding_stops") and resolved.get("dropping_stops"):
+            resolved["options_kind"] = "stops"
+            resolved["options_fresh"] = True
+        return resolved
+
     resolved = _resolve_selected_bus(context, user_message)
     resolved = _resolve_selected_stops(resolved, user_message)
     if any(

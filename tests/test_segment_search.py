@@ -15,6 +15,7 @@ from bus_booking_ai_agent.phase_03_mcp.tools.search_buses import (
     search_buses,
 )
 from bus_booking_ai_agent.phase_04_langgraph.test_integrated_agent import (
+    BookingContext,
     _resolve_selected_bus,
     ensure_selected_schedule_details,
     resolve_booking_context,
@@ -316,7 +317,7 @@ def test_bus_selected_from_segment_results_skips_stop_picker():
         "free_seats": 12,
     }
 
-    initial_context = {
+    initial_context: BookingContext = {
         "options_kind": "bus",
         "options_fresh": True,
         "available_schedules": [segment_bus],
@@ -369,4 +370,3 @@ def test_bus_options_user_facing_wording_available_seats():
     assert "8 available seats" in detail
     assert "seats free" not in detail
     assert "available_seats" not in detail
-

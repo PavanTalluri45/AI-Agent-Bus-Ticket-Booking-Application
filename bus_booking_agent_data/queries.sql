@@ -100,6 +100,14 @@ WHERE s.travel_date = $3
   AND s.status = 'SCHEDULED'
   AND b.is_active = TRUE
   AND o.is_active = TRUE
+  AND (
+      s.travel_date > (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+      OR (
+          s.travel_date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+          AND boarding_schedule_stop.departure_time
+              > (NOW() AT TIME ZONE 'Asia/Kolkata')::time
+      )
+  )
 ORDER BY boarding_schedule_stop.departure_time, f.amount;
 
 
@@ -666,7 +674,52 @@ ORDER BY b.bus_number;
 
 
 -- =============================================================================
--- 19. FIND DUPLICATE / MISSING SCHEDULE STOP COUNTS
+-- 19. COUNT UPCOMING DEPARTURES BY ROUTE AND DATE
+-- =============================================================================
+-- No parameters.
+--
+-- Unlike a count of schedules by travel_date, this excludes departures that
+-- have already left today. The date and time comparison uses India Standard
+-- Time, matching the application search behavior.
+
+SELECT
+    r.origin,
+    r.destination,
+    s.travel_date,
+    COUNT(DISTINCT s.id) AS upcoming_bus_count
+FROM schedules s
+JOIN routes r
+    ON r.id = s.route_id
+JOIN buses b
+    ON b.id = s.bus_id
+JOIN operators o
+    ON o.id = b.operator_id
+JOIN route_stops origin_stop
+    ON origin_stop.route_id = r.id
+   AND origin_stop.stop_name = r.origin
+   AND origin_stop.is_active = TRUE
+   AND origin_stop.is_boarding_allowed = TRUE
+JOIN schedule_stops boarding_schedule_stop
+    ON boarding_schedule_stop.schedule_id = s.id
+   AND boarding_schedule_stop.route_stop_id = origin_stop.id
+WHERE s.status = 'SCHEDULED'
+  AND r.is_active = TRUE
+  AND b.is_active = TRUE
+  AND o.is_active = TRUE
+  AND (
+      s.travel_date > (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+      OR (
+          s.travel_date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+          AND boarding_schedule_stop.departure_time
+              > (NOW() AT TIME ZONE 'Asia/Kolkata')::time
+      )
+  )
+GROUP BY r.origin, r.destination, s.travel_date
+ORDER BY s.travel_date, r.origin, r.destination;
+
+
+-- =============================================================================
+-- 20. FIND DUPLICATE / MISSING SCHEDULE STOP COUNTS
 -- =============================================================================
 -- No parameters.
 --

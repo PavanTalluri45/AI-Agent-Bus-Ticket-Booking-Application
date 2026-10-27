@@ -118,6 +118,7 @@ export interface StoredChatMessage {
     approval_required?: boolean;
     booking?: BookingSummary;
     payment_order?: PaymentOrderSummary;
+    confirmed_ticket?: ConfirmedTicketData;
     seat_map?: SeatMapData;
     options?: SelectionOptionsData;
     selected_seat?: string | null;

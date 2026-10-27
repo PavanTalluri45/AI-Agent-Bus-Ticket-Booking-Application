@@ -130,12 +130,59 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
               approvalRequired: m.metadata?.approval_required,
               booking: m.metadata?.booking,
               paymentOrder: m.metadata?.payment_order,
+              confirmedTicket: m.metadata?.confirmed_ticket,
               seatMap: m.metadata?.seat_map,
               options: m.metadata?.options,
               selectedSeat: m.metadata?.selected_seat,
               steps: m.metadata?.steps,
             };
           });
+
+          if (data.confirmed_ticket) {
+            const confirmationMessage: ChatMessage = {
+              id: `confirmed-${data.confirmed_ticket.booking_reference}`,
+              role: "assistant",
+              content:
+                "Payment verified successfully! Your bus ticket has been confirmed. You can see your complete ticket details below.",
+              timestamp: "",
+              confirmedTicket: data.confirmed_ticket,
+            };
+            const existingTicketIndex = loadedMessages.findIndex(
+              (message) =>
+                message.confirmedTicket?.booking_reference ===
+                data.confirmed_ticket?.booking_reference,
+            );
+            const existingConfirmationIndex = loadedMessages.findIndex(
+              (message) =>
+                message.content.includes("Payment verified successfully"),
+            );
+            if (existingTicketIndex >= 0 || existingConfirmationIndex >= 0) {
+              const confirmationIndex =
+                existingTicketIndex >= 0
+                  ? existingTicketIndex
+                  : existingConfirmationIndex;
+              loadedMessages[confirmationIndex] = {
+                ...loadedMessages[confirmationIndex],
+                confirmedTicket: data.confirmed_ticket,
+              };
+            } else {
+              const bookingMessageIndex = loadedMessages.findIndex(
+                (message) =>
+                  message.booking?.booking_reference ===
+                  data.confirmed_ticket?.booking_reference,
+              );
+              loadedMessages.splice(
+                bookingMessageIndex >= 0
+                  ? bookingMessageIndex + 1
+                  : loadedMessages.length,
+                0,
+                confirmationMessage,
+              );
+            }
+            setConfirmedTicket(data.confirmed_ticket);
+          } else {
+            setConfirmedTicket(null);
+          }
 
           setMessages(loadedMessages);
 
@@ -157,12 +204,6 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
             setActiveBooking(null);
           }
 
-          // Restore confirmed ticket
-          if (data.confirmed_ticket) {
-            setConfirmedTicket(data.confirmed_ticket);
-          } else {
-            setConfirmedTicket(null);
-          }
         }
       })
       .catch((err) => {
@@ -238,16 +279,17 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
       // Authoritative verification succeeded
       setIsVerifying(false);
 
-      if (verificationResult.ticket) {
-        setConfirmedTicket(verificationResult.ticket);
-      } else if (verificationResult.finalization?.booking) {
-        setConfirmedTicket({
+      const ticket =
+        verificationResult.ticket ??
+        (verificationResult.finalization?.booking
+          ? {
           booking_reference:
             verificationResult.finalization.booking.booking_reference,
           status: verificationResult.finalization.booking.status,
           total_amount: verificationResult.finalization.booking.total_amount,
-        });
-      }
+            }
+          : null);
+      setConfirmedTicket(ticket);
 
       // Clear pending payment order once confirmed
       setPaymentOrder(null);
@@ -264,6 +306,7 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
             hour: "2-digit",
             minute: "2-digit",
           }),
+          confirmedTicket: ticket || undefined,
         },
       ]);
     } catch (err: unknown) {
@@ -508,15 +551,13 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
   const isInputDisabled =
     isLoading || approvalRequired || isPaymentOpen || isVerifying || isInitialLoading;
   // The seat map is shown once, in the response that checked availability.
-  let newestSeatMapIndex = -1;
+  let newestSeatMapCandidateIndex = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].seatMap) {
-      newestSeatMapIndex = i;
+      newestSeatMapCandidateIndex = i;
       break;
     }
   }
-  const newestSeatMapMessage =
-    newestSeatMapIndex >= 0 ? messages[newestSeatMapIndex] : undefined;
   let newestOptionsIndex = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].options) {
@@ -526,6 +567,12 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
   }
   const newestOptionsMessage =
     newestOptionsIndex >= 0 ? messages[newestOptionsIndex] : undefined;
+  const newestSeatMapIndex =
+    newestSeatMapCandidateIndex > newestOptionsIndex
+      ? newestSeatMapCandidateIndex
+      : -1;
+  const newestSeatMapMessage =
+    newestSeatMapIndex >= 0 ? messages[newestSeatMapIndex] : undefined;
   const laterMessages =
     newestSeatMapIndex >= 0 ? messages.slice(newestSeatMapIndex + 1) : [];
   // Once the hold, booking or payment step starts, the map stops being clickable.
@@ -652,7 +699,11 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
                 )}
 
                 <div
-                  className={`flex flex-col max-w-[85%] sm:max-w-[78%] ${
+                  className={`flex flex-col ${
+                    msg.confirmedTicket
+                      ? "w-full max-w-full"
+                      : "max-w-[85%] sm:max-w-[78%]"
+                  } ${
                     isUser ? "items-end" : "items-start"
                   }`}
                 >
@@ -671,20 +722,32 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
                     {msg.content}
                   </div>
                   {!isUser && msg.id === newestSeatMapMessage?.id && msg.seatMap && (
-                    <SeatMap
-                      key={
-                        resolvedSeat ??
-                        msg.seatMap.selected_seat ??
-                        "unselected"
-                      }
-                      data={msg.seatMap}
-                      selectedSeat={resolvedSeat}
-                      locked={seatMapLocked}
-                      interactive={!seatMapLocked && !isInputDisabled}
-                      onSelectSeat={(seatNumber) => {
-                        void sendMessage(`I want seat ${seatNumber}`);
-                      }}
-                    />
+                    <>
+                      <SeatMap
+                        key={
+                          resolvedSeat ??
+                          msg.seatMap.selected_seat ??
+                          "unselected"
+                        }
+                        data={msg.seatMap}
+                        selectedSeat={resolvedSeat}
+                        locked={seatMapLocked}
+                        interactive={!seatMapLocked && !isInputDisabled}
+                        onSelectSeat={(seatNumber) => {
+                          void sendMessage(`I want seat ${seatNumber}`);
+                        }}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="mt-2"
+                        disabled={seatMapLocked || isInputDisabled}
+                        onClick={() => void sendMessage("Change stops")}
+                      >
+                        Change stops
+                      </Button>
+                    </>
                   )}
                   {!isUser &&
                     msg.id === newestOptionsMessage?.id &&
@@ -707,6 +770,12 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
                     <span className="text-[10px] text-muted-foreground mt-1 px-1">
                       {msg.timestamp}
                     </span>
+                  )}
+                  {!isUser && msg.confirmedTicket && (
+                    <ConfirmedTicket
+                      ticket={msg.confirmedTicket}
+                      onBookAnother={handleBookAnother}
+                    />
                   )}
                 </div>
               </div>
@@ -740,16 +809,6 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
                   )
                 }
                 disabled={isLoading || isVerifying}
-              />
-            </div>
-          )}
-
-          {/* Confirmed Ticket Card */}
-          {confirmedTicket && (
-            <div className="pl-9 sm:pl-11 pr-2">
-              <ConfirmedTicket
-                ticket={confirmedTicket}
-                onBookAnother={handleBookAnother}
               />
             </div>
           )}

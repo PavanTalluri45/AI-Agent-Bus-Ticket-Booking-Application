@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -61,7 +61,7 @@ def test_search_buses_returns_exact_overnight_display_times(monkeypatch):
         SearchBusesInput(
             origin="Hyderabad",
             destination="Chennai",
-            travel_date="2026-10-26",
+            travel_date=date(2026, 10, 26),
         )
     )
 
