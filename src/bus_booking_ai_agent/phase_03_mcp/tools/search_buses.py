@@ -25,7 +25,7 @@ class SearchBusesInput(BaseModel):
 
 
 SEARCH_BUSES_SQL = """
-WITH requested_stops AS (
+WITH candidate_stops AS (
     SELECT
         r.id AS route_id,
         r.origin AS route_origin,
@@ -35,20 +35,54 @@ WITH requested_stops AS (
         origin_stop.sequence_number AS boarding_sequence,
         destination_stop.id AS dropping_stop_id,
         destination_stop.stop_name AS dropping_stop_name,
-        destination_stop.sequence_number AS dropping_sequence
+        destination_stop.sequence_number AS dropping_sequence,
+        ROW_NUMBER() OVER (
+            PARTITION BY r.id
+            ORDER BY
+                CASE
+                    WHEN LOWER(BTRIM(origin_stop.stop_name)) = LOWER(BTRIM(:origin))
+                    THEN 0 ELSE 1
+                END,
+                CASE
+                    WHEN LOWER(BTRIM(destination_stop.stop_name)) = LOWER(BTRIM(:destination))
+                    THEN 0 ELSE 1
+                END,
+                origin_stop.sequence_number ASC,
+                destination_stop.sequence_number DESC
+        ) AS pair_rank
     FROM routes r
     JOIN route_stops origin_stop
         ON origin_stop.route_id = r.id
-       AND origin_stop.stop_name ILIKE :origin
+       AND (
+            LOWER(BTRIM(origin_stop.city)) = LOWER(BTRIM(:origin))
+            OR LOWER(BTRIM(origin_stop.stop_name)) = LOWER(BTRIM(:origin))
+       )
        AND origin_stop.is_active = TRUE
        AND origin_stop.is_boarding_allowed = TRUE
     JOIN route_stops destination_stop
         ON destination_stop.route_id = r.id
-       AND destination_stop.stop_name ILIKE :destination
+       AND (
+            LOWER(BTRIM(destination_stop.city)) = LOWER(BTRIM(:destination))
+            OR LOWER(BTRIM(destination_stop.stop_name)) = LOWER(BTRIM(:destination))
+       )
        AND destination_stop.is_active = TRUE
        AND destination_stop.is_dropping_allowed = TRUE
     WHERE r.is_active = TRUE
       AND origin_stop.sequence_number < destination_stop.sequence_number
+),
+requested_stops AS (
+    SELECT
+        route_id,
+        route_origin,
+        route_destination,
+        boarding_stop_id,
+        boarding_stop_name,
+        boarding_sequence,
+        dropping_stop_id,
+        dropping_stop_name,
+        dropping_sequence
+    FROM candidate_stops
+    WHERE pair_rank = 1
 ),
 schedule_stop_times AS (
     SELECT
@@ -138,33 +172,25 @@ SELECT
     ) AS _schedule_stops
 
 FROM schedules s
-
 JOIN buses b
     ON s.bus_id = b.id
-
 JOIN operators o
     ON b.operator_id = o.id
-
 JOIN routes r
     ON s.route_id = r.id
-
 JOIN requested_stops
     ON requested_stops.route_id = s.route_id
-
 JOIN schedule_stops origin_schedule_stop
     ON origin_schedule_stop.schedule_id = s.id
    AND origin_schedule_stop.route_stop_id = requested_stops.boarding_stop_id
-
 JOIN schedule_stops destination_schedule_stop
     ON destination_schedule_stop.schedule_id = s.id
    AND destination_schedule_stop.route_stop_id = requested_stops.dropping_stop_id
-
 JOIN fares fare
     ON fare.schedule_id = s.id
    AND fare.boarding_stop_id = requested_stops.boarding_stop_id
    AND fare.dropping_stop_id = requested_stops.dropping_stop_id
    AND fare.is_active = TRUE
-
 WHERE
     s.travel_date >= (CAST(:travel_date AS DATE) - 2)
     AND s.travel_date <= CAST(:travel_date AS DATE)
@@ -172,7 +198,6 @@ WHERE
     AND b.is_active = TRUE
     AND o.is_active = TRUE
     AND r.is_active = TRUE
-
 ORDER BY
     s.travel_date,
     origin_schedule_stop.departure_time,

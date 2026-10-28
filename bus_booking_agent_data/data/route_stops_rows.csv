@@ -1,0 +1,61 @@
+id,route_id,city,stop_name,sequence_number,is_boarding_allowed,is_dropping_allowed,is_active,created_at
+4c2f28df-7613-5770-ab1d-83a9c5a8ac07,1729efdd-e340-5069-a28b-05bee148da05,Hyderabad,Miyapur,1,True,False,True,2026-10-28 03:30:00+00
+77dbbc4f-c796-5094-9d9d-fdea61e1d0fc,1729efdd-e340-5069-a28b-05bee148da05,Hyderabad,KPHB Colony,2,True,False,True,2026-10-28 03:30:00+00
+ca75eb82-b6fe-5e3b-b1c1-c0ac76ff5fd9,1729efdd-e340-5069-a28b-05bee148da05,Hyderabad,Ameerpet,3,True,False,True,2026-10-28 03:30:00+00
+5cbf2976-1e39-5b74-a367-26a8f92847f8,1729efdd-e340-5069-a28b-05bee148da05,Hyderabad,MGBS Imlibun,4,True,False,True,2026-10-28 03:30:00+00
+317f76a5-9800-5049-adc4-2f192283875e,1729efdd-e340-5069-a28b-05bee148da05,Hyderabad,LB Nagar,5,True,False,True,2026-10-28 03:30:00+00
+22ca0ed0-d2fc-5946-8370-c1b282b7f89b,1729efdd-e340-5069-a28b-05bee148da05,Kurnool,Kurnool Bus Stand,6,True,True,True,2026-10-28 03:30:00+00
+7011dcc0-67ac-5f4c-808c-965e04d3cdbe,1729efdd-e340-5069-a28b-05bee148da05,Anantapur,Anantapur Bus Stand,7,True,True,True,2026-10-28 03:30:00+00
+42a33af7-5f99-5ac3-bf33-a52659b34842,1729efdd-e340-5069-a28b-05bee148da05,Bangalore,Kempegowda Airport,8,False,True,True,2026-10-28 03:30:00+00
+3dcdccba-ee4e-565e-800f-fc110fd6368b,1729efdd-e340-5069-a28b-05bee148da05,Bangalore,Hebbal,9,False,True,True,2026-10-28 03:30:00+00
+bedc2962-91c3-5cbf-af0f-2eedd5989760,1729efdd-e340-5069-a28b-05bee148da05,Bangalore,Majestic KBS,10,False,True,True,2026-10-28 03:30:00+00
+164e11bf-10bb-54d2-a24e-091e6d9c4acd,1729efdd-e340-5069-a28b-05bee148da05,Bangalore,Madiwala,11,False,True,True,2026-10-28 03:30:00+00
+31f8528f-d629-579e-b768-3beac001c398,1729efdd-e340-5069-a28b-05bee148da05,Bangalore,Silk Board,12,False,True,True,2026-10-28 03:30:00+00
+48707221-cc5c-5a51-ad74-6bc174421da6,8a7165f3-11ee-5e56-b09e-dd3dad561be1,Bangalore,Majestic KBS,1,True,False,True,2026-10-28 03:30:00+00
+0cd48e71-61c2-5433-a91a-dfbb3b01297e,8a7165f3-11ee-5e56-b09e-dd3dad561be1,Bangalore,Shantinagar TTMC,2,True,False,True,2026-10-28 03:30:00+00
+a1239bdf-f34c-5738-8a66-23ae06247312,8a7165f3-11ee-5e56-b09e-dd3dad561be1,Bangalore,Madiwala,3,True,False,True,2026-10-28 03:30:00+00
+b3d55541-c78e-5fb5-937e-3f8650e880ba,8a7165f3-11ee-5e56-b09e-dd3dad561be1,Bangalore,Silk Board,4,True,False,True,2026-10-28 03:30:00+00
+aa70116b-88fd-5aef-9583-0e68a9c2f13a,8a7165f3-11ee-5e56-b09e-dd3dad561be1,Bangalore,Electronic City,5,True,False,True,2026-10-28 03:30:00+00
+31b18136-fec9-5020-b2b5-eaa96a8904b3,8a7165f3-11ee-5e56-b09e-dd3dad561be1,Krishnagiri,Krishnagiri Bus Stand,6,True,True,True,2026-10-28 03:30:00+00
+8b827e53-e565-5f1f-abfe-a7019885b3c7,8a7165f3-11ee-5e56-b09e-dd3dad561be1,Vellore,Vellore Bus Stand,7,True,True,True,2026-10-28 03:30:00+00
+47f67ede-9fba-5440-87be-58a89c9a55fe,8a7165f3-11ee-5e56-b09e-dd3dad561be1,Chennai,Poonamallee,8,False,True,True,2026-10-28 03:30:00+00
+2ee65946-562d-5312-a472-1793565a6948,8a7165f3-11ee-5e56-b09e-dd3dad561be1,Chennai,Koyambedu CMBT,9,False,True,True,2026-10-28 03:30:00+00
+9de945e5-f15a-5477-bf5e-e3ae313c3cb6,8a7165f3-11ee-5e56-b09e-dd3dad561be1,Chennai,Guindy,10,False,True,True,2026-10-28 03:30:00+00
+07dead92-90b4-5cd9-989f-5796b543c3fd,8a7165f3-11ee-5e56-b09e-dd3dad561be1,Chennai,Chennai Airport,11,False,True,True,2026-10-28 03:30:00+00
+457bd3ee-e178-57c5-9bc9-256d1119d675,8a7165f3-11ee-5e56-b09e-dd3dad561be1,Chennai,Tambaram,12,False,True,True,2026-10-28 03:30:00+00
+ae86a9c7-27ea-574b-9671-2c3c6b64b928,94264b5e-2735-5193-a3a2-e07b8e3856a1,Hyderabad,Miyapur,1,True,False,True,2026-10-28 03:30:00+00
+db4c07b1-bc4c-56da-983c-59fb1dae6260,94264b5e-2735-5193-a3a2-e07b8e3856a1,Hyderabad,KPHB Colony,2,True,False,True,2026-10-28 03:30:00+00
+ea2806b8-2e64-5321-a305-f77064eae256,94264b5e-2735-5193-a3a2-e07b8e3856a1,Hyderabad,Ameerpet,3,True,False,True,2026-10-28 03:30:00+00
+11f3fc93-ac13-581e-8238-89e197fe47c8,94264b5e-2735-5193-a3a2-e07b8e3856a1,Hyderabad,MGBS Imlibun,4,True,False,True,2026-10-28 03:30:00+00
+abc81553-bf9c-5387-989a-9381ace03df9,94264b5e-2735-5193-a3a2-e07b8e3856a1,Hyderabad,LB Nagar,5,True,False,True,2026-10-28 03:30:00+00
+32465a6c-e8f6-567c-bbae-1522705314dc,94264b5e-2735-5193-a3a2-e07b8e3856a1,Suryapet,Suryapet Bus Stand,6,True,True,True,2026-10-28 03:30:00+00
+c34432be-ef93-589a-b63a-4799566a7fc8,94264b5e-2735-5193-a3a2-e07b8e3856a1,Khammam,Khammam Bus Stand,7,True,True,True,2026-10-28 03:30:00+00
+73427e7e-f132-56f6-b149-c04197ce44c1,94264b5e-2735-5193-a3a2-e07b8e3856a1,Vijayawada,Gollapudi,8,False,True,True,2026-10-28 03:30:00+00
+277df5b8-6324-52e2-a243-df203a9dcfd8,94264b5e-2735-5193-a3a2-e07b8e3856a1,Vijayawada,Ramavarappadu Ring,9,False,True,True,2026-10-28 03:30:00+00
+b0f6fc7a-85a1-53af-a9de-eb2a97e8ceab,94264b5e-2735-5193-a3a2-e07b8e3856a1,Vijayawada,Benz Circle,10,False,True,True,2026-10-28 03:30:00+00
+a98b3a69-c2ce-55df-9a10-75b79179586a,94264b5e-2735-5193-a3a2-e07b8e3856a1,Vijayawada,Governorpet,11,False,True,True,2026-10-28 03:30:00+00
+65a5e08c-59ef-5a79-8c8b-e54af67c677a,94264b5e-2735-5193-a3a2-e07b8e3856a1,Vijayawada,Pandit Nehru Bus Station,12,False,True,True,2026-10-28 03:30:00+00
+1facffe1-4007-57e5-a7a1-9eb27322cfc4,e6f6962a-8ff5-5bd8-974a-a4cadfcf2d7e,Hyderabad,Miyapur,1,True,False,True,2026-10-28 03:30:00+00
+25dcbff2-1786-5dda-9bd4-2d76b5ce69ea,e6f6962a-8ff5-5bd8-974a-a4cadfcf2d7e,Hyderabad,KPHB Colony,2,True,False,True,2026-10-28 03:30:00+00
+401d50d0-1da5-5fc1-ad5e-dc5c285ed7c5,e6f6962a-8ff5-5bd8-974a-a4cadfcf2d7e,Hyderabad,Ameerpet,3,True,False,True,2026-10-28 03:30:00+00
+44504aca-0395-565d-98f5-4434ce792d24,e6f6962a-8ff5-5bd8-974a-a4cadfcf2d7e,Hyderabad,MGBS Imlibun,4,True,False,True,2026-10-28 03:30:00+00
+e8df5f87-ef4a-549f-bb5d-7892eb6f48a8,e6f6962a-8ff5-5bd8-974a-a4cadfcf2d7e,Hyderabad,LB Nagar,5,True,False,True,2026-10-28 03:30:00+00
+69e6f0e8-0b94-5d25-89a6-5dea131515ba,e6f6962a-8ff5-5bd8-974a-a4cadfcf2d7e,Nalgonda,Nalgonda Bus Stand,6,True,True,True,2026-10-28 03:30:00+00
+0e7850a2-bb45-5b5d-9f5f-6e16bdc0aa4e,e6f6962a-8ff5-5bd8-974a-a4cadfcf2d7e,Tirupati,Tirupati Bus Stand,7,True,True,True,2026-10-28 03:30:00+00
+e5c08a7a-4422-5577-8689-7e8f8b88fc18,e6f6962a-8ff5-5bd8-974a-a4cadfcf2d7e,Chennai,Poonamallee,8,False,True,True,2026-10-28 03:30:00+00
+4f373211-8745-51b0-a15d-670a5e385de1,e6f6962a-8ff5-5bd8-974a-a4cadfcf2d7e,Chennai,Koyambedu CMBT,9,False,True,True,2026-10-28 03:30:00+00
+5bbc9b50-a735-5af2-8f49-f3fb4344c48b,e6f6962a-8ff5-5bd8-974a-a4cadfcf2d7e,Chennai,Guindy,10,False,True,True,2026-10-28 03:30:00+00
+f0c8a1d2-1b0e-5c23-8eff-3f7e42ca2784,e6f6962a-8ff5-5bd8-974a-a4cadfcf2d7e,Chennai,Chennai Airport,11,False,True,True,2026-10-28 03:30:00+00
+633ff93a-5e37-578a-83e3-3882ff79260e,e6f6962a-8ff5-5bd8-974a-a4cadfcf2d7e,Chennai,Tambaram,12,False,True,True,2026-10-28 03:30:00+00
+77228a5c-dded-5b7b-92ef-e85b01c1a4d1,efca8a0e-bd1f-5b43-a798-3c0a7d610765,Bangalore,Silk Board,1,True,False,True,2026-10-28 03:30:00+00
+255c7b84-31f6-5376-8b32-77277ad27358,efca8a0e-bd1f-5b43-a798-3c0a7d610765,Bangalore,Madiwala,2,True,False,True,2026-10-28 03:30:00+00
+05c5dc40-9429-5ff3-bc21-ec250ccceafb,efca8a0e-bd1f-5b43-a798-3c0a7d610765,Bangalore,Majestic KBS,3,True,False,True,2026-10-28 03:30:00+00
+61f137de-5f15-51e4-9451-0672e3b6bfd1,efca8a0e-bd1f-5b43-a798-3c0a7d610765,Bangalore,Hebbal,4,True,False,True,2026-10-28 03:30:00+00
+c0dedeb8-7cc4-51f8-b9d4-3f7256d7edc9,efca8a0e-bd1f-5b43-a798-3c0a7d610765,Bangalore,Kempegowda Airport,5,True,False,True,2026-10-28 03:30:00+00
+bfb57cd2-8616-5276-a42b-f0e19813c3fb,efca8a0e-bd1f-5b43-a798-3c0a7d610765,Anantapur,Anantapur Bus Stand,6,True,True,True,2026-10-28 03:30:00+00
+e8caefca-57b8-52ee-9ed2-c278c67a29db,efca8a0e-bd1f-5b43-a798-3c0a7d610765,Kurnool,Kurnool Bus Stand,7,True,True,True,2026-10-28 03:30:00+00
+6fe49327-5d69-5b3e-97cb-0afce7cac34e,efca8a0e-bd1f-5b43-a798-3c0a7d610765,Hyderabad,Shamshabad Airport,8,False,True,True,2026-10-28 03:30:00+00
+5902f326-fe9f-5965-8cda-3a4254d047e9,efca8a0e-bd1f-5b43-a798-3c0a7d610765,Hyderabad,Mehdipatnam,9,False,True,True,2026-10-28 03:30:00+00
+c77720a2-7538-5428-99e4-03140929dc77,efca8a0e-bd1f-5b43-a798-3c0a7d610765,Hyderabad,MGBS Imlibun,10,False,True,True,2026-10-28 03:30:00+00
+5028d9ae-dc42-5232-ba89-a53d4b2b673e,efca8a0e-bd1f-5b43-a798-3c0a7d610765,Hyderabad,Ameerpet,11,False,True,True,2026-10-28 03:30:00+00
+c46ed6c1-ff0d-50c8-bf5d-f9128e0b748e,efca8a0e-bd1f-5b43-a798-3c0a7d610765,Hyderabad,Miyapur,12,False,True,True,2026-10-28 03:30:00+00

@@ -25,37 +25,39 @@
 -- 01. SEARCH BUSES
 -- =============================================================================
 -- Parameters:
---   $1 = origin text
---   $2 = destination text
+--   $1 = origin CITY (matches route_stops.city, e.g. 'Hyderabad')
+--   $2 = destination CITY (e.g. 'Vijayawada')
 --   $3 = travel_date date
 --
 -- Returns one row per matching schedule, including:
 --   operator, bus, bus type, departure/arrival time and fare.
 --
--- The fare is selected for the requested route endpoints. Pricing is therefore
--- read from `fares`, not calculated from `bus_type`.
+-- Each city has several boarding/dropping points, so this returns ONE row per
+-- schedule with the cheapest and dearest fare across all point pairs
+-- (fare_from / fare_to). After the user picks a bus, use queries 04/05 to list
+-- the points and query 09 for the exact fare of the chosen pair.
+-- Any two cities on a route work (e.g. Suryapet -> Vijayawada), not only the
+-- route's origin and destination.
 
 WITH requested_stops AS (
     SELECT
         r.id AS route_id,
-        r.origin,
-        r.destination,
         origin_stop.id AS boarding_stop_id,
-        destination_stop.id AS dropping_stop_id
+        origin_stop.sequence_number AS boarding_sequence,
+        destination_stop.id AS dropping_stop_id,
+        destination_stop.sequence_number AS dropping_sequence
     FROM routes r
     JOIN route_stops origin_stop
         ON origin_stop.route_id = r.id
-       AND origin_stop.stop_name = $1
+       AND origin_stop.city = $1
        AND origin_stop.is_active = TRUE
        AND origin_stop.is_boarding_allowed = TRUE
     JOIN route_stops destination_stop
         ON destination_stop.route_id = r.id
-       AND destination_stop.stop_name = $2
+       AND destination_stop.city = $2
        AND destination_stop.is_active = TRUE
        AND destination_stop.is_dropping_allowed = TRUE
-    WHERE r.origin = $1
-      AND r.destination = $2
-      AND r.is_active = TRUE
+    WHERE r.is_active = TRUE
       AND origin_stop.sequence_number < destination_stop.sequence_number
 )
 SELECT
@@ -72,10 +74,12 @@ SELECT
     r.origin,
     r.destination,
     s.travel_date,
-    boarding_schedule_stop.departure_time AS departure_time,
-    dropping_schedule_stop.arrival_time AS arrival_time,
-    f.amount AS fare_amount,
-    f.currency
+    -- first boarding point's departure and last dropping point's arrival
+    (array_agg(bss.departure_time ORDER BY rs.boarding_sequence ASC))[1]  AS departure_time,
+    (array_agg(dss.arrival_time   ORDER BY rs.dropping_sequence DESC))[1] AS arrival_time,
+    MIN(f.amount) AS fare_from,
+    MAX(f.amount) AS fare_to,
+    MIN(f.currency) AS currency
 FROM schedules s
 JOIN requested_stops rs
     ON rs.route_id = s.route_id
@@ -85,12 +89,12 @@ JOIN operators o
     ON o.id = b.operator_id
 JOIN routes r
     ON r.id = s.route_id
-JOIN schedule_stops boarding_schedule_stop
-    ON boarding_schedule_stop.schedule_id = s.id
-   AND boarding_schedule_stop.route_stop_id = rs.boarding_stop_id
-JOIN schedule_stops dropping_schedule_stop
-    ON dropping_schedule_stop.schedule_id = s.id
-   AND dropping_schedule_stop.route_stop_id = rs.dropping_stop_id
+JOIN schedule_stops bss
+    ON bss.schedule_id = s.id
+   AND bss.route_stop_id = rs.boarding_stop_id
+JOIN schedule_stops dss
+    ON dss.schedule_id = s.id
+   AND dss.route_stop_id = rs.dropping_stop_id
 JOIN fares f
     ON f.schedule_id = s.id
    AND f.boarding_stop_id = rs.boarding_stop_id
@@ -104,11 +108,11 @@ WHERE s.travel_date = $3
       s.travel_date > (NOW() AT TIME ZONE 'Asia/Kolkata')::date
       OR (
           s.travel_date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date
-          AND boarding_schedule_stop.departure_time
-              > (NOW() AT TIME ZONE 'Asia/Kolkata')::time
+          AND bss.departure_time > (NOW() AT TIME ZONE 'Asia/Kolkata')::time
       )
   )
-ORDER BY boarding_schedule_stop.departure_time, f.amount;
+GROUP BY s.id, o.id, b.id, r.id
+ORDER BY departure_time, fare_from;
 
 
 -- =============================================================================
@@ -158,6 +162,7 @@ WHERE s.id = $1;
 SELECT
     ss.id AS schedule_stop_id,
     rs.id AS route_stop_id,
+    rs.city,
     rs.stop_name,
     rs.sequence_number,
     ss.arrival_time,
@@ -182,6 +187,7 @@ ORDER BY rs.sequence_number;
 
 SELECT
     ss.route_stop_id,
+    rs.city,
     rs.stop_name,
     rs.sequence_number,
     ss.departure_time
@@ -205,6 +211,7 @@ ORDER BY rs.sequence_number;
 
 SELECT
     ss.route_stop_id,
+    rs.city,
     rs.stop_name,
     rs.sequence_number,
     ss.arrival_time
@@ -389,15 +396,16 @@ WHERE bs.is_active = TRUE
 --   $2 = boarding_stop_id uuid
 --   $3 = dropping_stop_id uuid
 --
--- Returns the explicitly stored fare.
--- No bus-type-based price calculation is performed.
+-- Returns the explicitly stored fare. No price calculation is done at runtime.
 
 SELECT
     f.id AS fare_id,
     f.schedule_id,
     f.boarding_stop_id,
+    boarding.city AS boarding_city,
     boarding.stop_name AS boarding_point,
     f.dropping_stop_id,
+    dropping.city AS dropping_city,
     dropping.stop_name AS dropping_point,
     f.amount,
     f.currency
@@ -544,12 +552,14 @@ ORDER BY o.name, b.bus_number;
 -- No parameters.
 --
 -- Development/validation query.
--- Expected result: exactly 5 operators for each of the 5 routes.
+-- Expected result: bus_count = 5 for each of the 5 routes. One operator may run
+-- more than one bus on a route, so operator_count can be below 5.
 
 SELECT
     r.id AS route_id,
     r.origin,
     r.destination,
+    COUNT(DISTINCT b.id) AS bus_count,
     COUNT(DISTINCT b.operator_id) AS operator_count
 FROM routes r
 JOIN schedules s
@@ -696,7 +706,7 @@ JOIN operators o
     ON o.id = b.operator_id
 JOIN route_stops origin_stop
     ON origin_stop.route_id = r.id
-   AND origin_stop.stop_name = r.origin
+   AND origin_stop.city = r.origin
    AND origin_stop.is_active = TRUE
    AND origin_stop.is_boarding_allowed = TRUE
 JOIN schedule_stops boarding_schedule_stop

@@ -1,0 +1,26 @@
+id,operator_id,bus_number,bus_type,total_seats,amenities,is_active,created_at
+04e4425d-ec02-5e24-a3cb-9f071cb2cf03,4b0bd329-9b34-5ae6-bf33-875216ee29e9,TN02UD1101,Non-AC Seater,48,"[""Charging Point"",""Water Bottle""]",true,2025-02-01 03:30:00+00
+12f5cebd-b5f4-5781-888e-1ea6b5efb49f,aec5db62-a2ca-5b35-b9bd-fd2f67be7838,TN02UD1110,Volvo AC,36,"[""AC"",""Charging Point"",""WiFi"",""Blanket"",""Water Bottle"",""Entertainment System""]",true,2025-02-01 03:30:00+00
+1a387fd9-13bb-58ec-8459-1d3dfd3d4ff8,b053beef-520d-52d2-85e9-d656e8e2b51d,TS09UH1070,AC Seater,40,"[""AC"",""Charging Point"",""WiFi"",""Water Bottle""]",true,2025-02-01 03:30:00+00
+1ca69838-3825-55c6-852f-d8623dab6e9b,c0dbd3e8-2f94-595a-bb1e-3bab64c3662c,TS09UB1241,Non-AC Sleeper,32,"[""Blanket"",""Charging Point"",""Water Bottle""]",true,2025-02-01 03:30:00+00
+2658f931-d56c-5b5f-be05-8a5a464ecc47,3dd9bff4-2db8-506a-85d0-e748186a2192,KA05UF1121,Non-AC Sleeper,32,"[""Blanket"",""Charging Point"",""Water Bottle""]",true,2025-02-01 03:30:00+00
+270ca755-76e8-5c5d-9b84-334ecbfc2e79,e3c522b4-a85e-54a2-84fe-f035d58902ad,TS09UB1010,AC Seater,40,"[""AC"",""Charging Point"",""WiFi"",""Water Bottle""]",true,2025-02-01 03:30:00+00
+31122525-c54c-5867-896f-1a46d37973a9,09736a71-b22b-5fd0-8d90-b9a2f1b922cc,KA05UC1020,Volvo AC,36,"[""AC"",""Charging Point"",""WiFi"",""Blanket"",""Water Bottle"",""Entertainment System""]",true,2025-02-01 03:30:00+00
+312bb204-eda5-551c-b059-7de813d498a6,92fe0fe8-29b2-53f5-b226-bea5a8884a6d,TS09UH1150,AC Sleeper,30,"[""AC"",""Blanket"",""Charging Point"",""WiFi"",""Water Bottle"",""Reading Light""]",true,2025-02-01 03:30:00+00
+35010aa1-a656-5430-b19d-b5b5f3ed9609,3dd9bff4-2db8-506a-85d0-e748186a2192,KA05UE1120,AC Sleeper,30,"[""AC"",""Blanket"",""Charging Point"",""WiFi"",""Water Bottle"",""Reading Light""]",true,2025-02-01 03:30:00+00
+376bf2c2-e2fc-57cc-8b00-1f0b30755e23,2b624806-f1d8-55f2-befa-49f75d3a449c,KA05UE1031,Non-AC Sleeper,32,"[""Blanket"",""Charging Point"",""Water Bottle""]",true,2025-02-01 03:30:00+00
+3fcdef30-c5f5-5d48-b677-7c293ca500d5,07b21db2-29b1-5cb4-b560-02bda872f33c,AP16UB1170,Volvo AC,36,"[""AC"",""Charging Point"",""WiFi"",""Blanket"",""Water Bottle"",""Entertainment System""]",true,2025-02-01 03:30:00+00
+40a4c9e4-d52b-55b1-a58f-9b0d57968902,3450fb83-4d70-5d69-b25c-83f695374bb0,KA05UG1140,Volvo AC,36,"[""AC"",""Charging Point"",""WiFi"",""Blanket"",""Water Bottle"",""Entertainment System""]",true,2025-02-01 03:30:00+00
+499232a6-4fe3-589b-adc2-dff0d032e4ef,c7db91c2-2511-5a3d-b5e6-c25c8bf01d6c,KA05UG1220,AC Seater,40,"[""AC"",""Charging Point"",""WiFi"",""Water Bottle""]",true,2025-02-01 03:30:00+00
+4a8048b7-b958-571b-a216-58605ffd5400,c7db91c2-2511-5a3d-b5e6-c25c8bf01d6c,KA05UH1221,Non-AC Seater,48,"[""Charging Point"",""Water Bottle""]",true,2025-02-01 03:30:00+00
+4a8f1dd0-b68a-5003-9707-9c11cec3abdb,fbd2ace6-4d3a-5a1f-885e-5f30eb6f4510,TN02UA1080,Volvo AC,36,"[""AC"",""Charging Point"",""WiFi"",""Blanket"",""Water Bottle"",""Entertainment System""]",true,2025-02-01 03:30:00+00
+5039de78-36e0-5640-8f52-765fb918d4f3,6975cd63-a6b4-501e-9bc8-9d500b26227a,TS09UE1040,AC Seater,40,"[""AC"",""Charging Point"",""WiFi"",""Water Bottle""]",true,2025-02-01 03:30:00+00
+545501e4-90b2-55df-89d1-75b54cc4f01f,2b624806-f1d8-55f2-befa-49f75d3a449c,KA05UD1030,AC Sleeper,30,"[""AC"",""Blanket"",""Charging Point"",""WiFi"",""Water Bottle"",""Reading Light""]",true,2025-02-01 03:30:00+00
+5769abdd-2152-5873-b02d-0df959adac44,03cfcbae-a240-5c29-a707-c27b05d31927,KA05UF1210,AC Sleeper,30,"[""AC"",""Blanket"",""Charging Point"",""WiFi"",""Water Bottle"",""Reading Light""]",true,2025-02-01 03:30:00+00
+6091fd8e-b1bf-58c2-9dca-a7601f1ecde8,6bc1dc8d-558b-5991-ad43-5ba8128763c1,AP16UC1180,AC Sleeper,30,"[""AC"",""Blanket"",""Charging Point"",""WiFi"",""Water Bottle"",""Reading Light""]",true,2025-02-01 03:30:00+00
+62fef528-99e4-5856-b0c4-cd249706df6b,1d7993fe-0977-5ac0-b4ec-f6f22d1d5751,TS09UB1161,Non-AC Seater,48,"[""Charging Point"",""Water Bottle""]",true,2025-02-01 03:30:00+00
+6376b4e9-d19c-5ff4-82cf-c471edf1387f,6bc1dc8d-558b-5991-ad43-5ba8128763c1,AP16UD1181,Non-AC Sleeper,32,"[""Blanket"",""Charging Point"",""Water Bottle""]",true,2025-02-01 03:30:00+00
+648295d4-e9e5-55c5-b1a7-ee175a6da603,74e99ab9-a3be-5802-904a-00fca3815572,TS09UH1061,Non-AC Sleeper,32,"[""Blanket"",""Charging Point"",""Water Bottle""]",true,2025-02-01 03:30:00+00
+775dbefa-6f6c-55c8-aefe-f484422f2033,75ed150b-163d-5eed-95ac-e9f782103d9c,TN02UF1050,Volvo AC,36,"[""AC"",""Charging Point"",""WiFi"",""Blanket"",""Water Bottle"",""Entertainment System""]",true,2025-02-01 03:30:00+00
+7a4d14ef-ed96-5770-8e0d-1e05b23ba731,f3f08943-e422-5341-bad2-fe3a2f0f4f1e,TS09UB1090,AC Sleeper,30,"[""AC"",""Blanket"",""Charging Point"",""WiFi"",""Water Bottle"",""Reading Light""]",true,2025-02-01 03:30:00+00
+8d3ccece-814f-5e5a-8bab-a4ad2f49bd08,c0dbd3e8-2f94-595a-bb1e-3bab64c3662c,TS09UA1240,AC Sleeper,30,"[""AC"",""Blanket"",""Charging Point"",""WiFi"",""Water Bottle"",""Reading Light""]",true,2025-02-01 03:30:00+00

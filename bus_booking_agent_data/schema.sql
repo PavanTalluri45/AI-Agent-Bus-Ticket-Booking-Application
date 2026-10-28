@@ -11,7 +11,13 @@ create table operators (
     contact_phone  text,
     email          text,
     is_active      boolean not null default true,
-    created_at     timestamptz not null default now()
+    -- Brand tier drives a fare multiplier at seed time (PREMIUM 1.10,
+    -- STANDARD 1.00, BUDGET 0.92). It is not used to calculate fares at runtime.
+    brand_tier     text not null default 'STANDARD',
+    created_at     timestamptz not null default now(),
+    constraint operators_brand_tier_check check (
+        brand_tier in ('PREMIUM', 'STANDARD', 'BUDGET')
+    )
 );
 
 -- =============================================================================
@@ -77,6 +83,10 @@ create table routes (
 create table route_stops (
     id                    uuid primary key default gen_random_uuid(),
     route_id              uuid not null references routes (id),
+    -- City the point belongs to (e.g. 'Hyderabad'). stop_name is the specific
+    -- boarding/dropping point inside it (e.g. 'Ameerpet'). Search by city,
+    -- then let the user pick the exact point.
+    city                  text not null,
     stop_name             text not null,
     sequence_number       integer not null,
     is_boarding_allowed   boolean not null default true,
@@ -139,9 +149,11 @@ create table fares (
     -- sequence on the shared route, and both must belong to schedule's route.
     -- Enforced in the service layer (and true by construction in seed data).
     --
-    -- Fare is deliberately NOT derived from bus_type. It is stored explicitly
-    -- per (schedule, boarding_stop, dropping_stop) so it can vary freely by
-    -- operator, schedule and segment distance.
+    -- Fare is stored explicitly per (schedule, boarding_stop, dropping_stop).
+    -- The seed data computes it from: segment km, bus_type (base + per-km),
+    -- amenities, operator brand_tier, premium points (central stand / airport),
+    -- and a travel-date surge (Fri/Sun +10%, festival windows +20%).
+    -- The application never recalculates it; it only reads this table.
 );
 
 -- =============================================================================
@@ -304,6 +316,7 @@ create index idx_schedules_travel_date on schedules (travel_date);
 create index idx_schedules_status on schedules (status);
 
 create index idx_route_stops_route_id on route_stops (route_id);
+create index idx_route_stops_city on route_stops (city);
 
 create index idx_schedule_stops_schedule_id on schedule_stops (schedule_id);
 create index idx_schedule_stops_route_stop_id on schedule_stops (route_stop_id);

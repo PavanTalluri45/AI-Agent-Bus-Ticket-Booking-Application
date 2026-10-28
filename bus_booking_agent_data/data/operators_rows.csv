@@ -1,0 +1,21 @@
+id,name,code,contact_phone,email,is_active,brand_tier,created_at
+07b21db2-29b1-5cb4-b560-02bda872f33c,Ganesh Travels,GNT,9866012318,care@ganeshtravels.in,true,PREMIUM,2025-01-15 03:30:00+00
+03cfcbae-a240-5c29-a707-c27b05d31927,Greenline Travels,GRL,9845012322,info@greenlinetravels.in,true,STANDARD,2025-01-15 03:30:00+00
+3450fb83-4d70-5d69-b25c-83f695374bb0,IntrCity Smart Travels,ICB,9845012315,help@intrcitysmart.in,true,PREMIUM,2025-01-15 03:30:00+00
+f3f08943-e422-5341-bad2-fe3a2f0f4f1e,Jabbar Travels,JBT,9848012310,help@jabbartravels.in,true,STANDARD,2025-01-15 03:30:00+00
+4b0bd329-9b34-5ae6-bf33-875216ee29e9,KPN Travels,KPN,9840012311,support@kpntravels.in,true,BUDGET,2025-01-15 03:30:00+00
+3dd9bff4-2db8-506a-85d0-e748186a2192,Kallada Travels,KLD,9845012313,care@kalladatravels.in,true,STANDARD,2025-01-15 03:30:00+00
+09736a71-b22b-5fd0-8d90-b9a2f1b922cc,Kaveri Travels,KVT,9845012303,info@kaveritravels.in,true,PREMIUM,2025-01-15 03:30:00+00
+6975cd63-a6b4-501e-9bc8-9d500b26227a,Konduskar Travels,KDT,9848012305,help@konduskartravels.in,true,STANDARD,2025-01-15 03:30:00+00
+2b624806-f1d8-55f2-befa-49f75d3a449c,Morning Star Travels,MST,9845012304,care@morningstartravels.in,true,STANDARD,2025-01-15 03:30:00+00
+74e99ab9-a3be-5802-904a-00fca3815572,National Travels,NTL,9848012307,info@nationaltravels.in,true,STANDARD,2025-01-15 03:30:00+00
+1d7993fe-0977-5ac0-b4ec-f6f22d1d5751,Neeta Tours and Travels,NTT,9848012317,info@neetatravels.in,true,BUDGET,2025-01-15 03:30:00+00
+e3c522b4-a85e-54a2-84fe-f035d58902ad,Orange Tours and Travels,ORT,9848012302,support@orangetravels.in,true,BUDGET,2025-01-15 03:30:00+00
+75ed150b-163d-5eed-95ac-e9f782103d9c,Parveen Travels,PRV,9840012306,support@parveentravels.in,true,PREMIUM,2025-01-15 03:30:00+00
+c7db91c2-2511-5a3d-b5e6-c25c8bf01d6c,Patel Tours and Travels,PTT,9845012323,care@pateltravels.in,true,BUDGET,2025-01-15 03:30:00+00
+c0dbd3e8-2f94-595a-bb1e-3bab64c3662c,Royal Cruiser Travels,RCT,9848012325,help@royalcruisertravels.in,true,STANDARD,2025-01-15 03:30:00+00
+aec5db62-a2ca-5b35-b9bd-fd2f67be7838,SRS Travels,SRT,9840012312,info@srstravels.in,true,STANDARD,2025-01-15 03:30:00+00
+fbd2ace6-4d3a-5a1f-885e-5f30eb6f4510,Sharma Transports,SHT,9840012309,contact@sharmatransports.in,true,PREMIUM,2025-01-15 03:30:00+00
+6bc1dc8d-558b-5991-ad43-5ba8128763c1,Sri Krishna Travels,SKT,9866012319,contact@srikrishnatravels.in,true,STANDARD,2025-01-15 03:30:00+00
+92fe0fe8-29b2-53f5-b226-bea5a8884a6d,VRL Travels,VRL,9848012316,support@vrltravels.in,true,STANDARD,2025-01-15 03:30:00+00
+b053beef-520d-52d2-85e9-d656e8e2b51d,YBM Travels,YBM,9848012308,care@ybmtravels.in,true,BUDGET,2025-01-15 03:30:00+00
