@@ -737,16 +737,6 @@ export function BusBookingChat({ conversationId: initialConversationId }: BusBoo
                           void sendMessage(`I want seat ${seatNumber}`);
                         }}
                       />
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="mt-2"
-                        disabled={seatMapLocked || isInputDisabled}
-                        onClick={() => void sendMessage("Change stops")}
-                      >
-                        Change stops
-                      </Button>
                     </>
                   )}
                   {!isUser &&

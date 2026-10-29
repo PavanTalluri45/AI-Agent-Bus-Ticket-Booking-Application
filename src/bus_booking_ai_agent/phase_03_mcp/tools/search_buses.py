@@ -283,10 +283,12 @@ def search_buses(
             departure_display = format_time_display(
                 schedule["departure_time"],
                 boarding_departure_day_offset,
+                schedule_travel_date,
             )
             arrival_display = format_time_display(
                 schedule["arrival_time"],
                 dropping_arrival_day_offset,
+                schedule_travel_date,
             )
 
             schedule["departure_day_offset"] = boarding_departure_day_offset

@@ -48,5 +48,5 @@ def test_add_day_offsets_uses_stored_offset_when_present():
 
 
 def test_format_time_display_uses_12_hour_time_and_positive_day_offset():
-    assert format_time_display("20:30:00", 0) == "8:30 PM"
-    assert format_time_display("06:30:00", 1) == "6:30 AM (next day)"
+    assert format_time_display("20:30:00", 0, "2026-10-26") == "8:30 PM"
+    assert format_time_display("06:30:00", 1, "2026-10-26") == "6:30 AM, 27 Oct"

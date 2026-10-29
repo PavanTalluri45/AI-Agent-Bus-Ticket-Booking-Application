@@ -1094,21 +1094,6 @@ def _normalize_selection_text(value: str) -> str:
     return " ".join(value.lower().replace("-", " ").split())
 
 
-def _is_change_stops_request(user_message: str) -> bool:
-    message = _normalize_selection_text(user_message)
-    return any(
-        phrase in message
-        for phrase in (
-            "change stop",
-            "change boarding",
-            "change dropping",
-            "change drop off",
-            "pick different stops",
-            "choose different stops",
-        )
-    )
-
-
 def _resolve_selected_bus(
     context: BookingContext,
     user_message: str,
@@ -1157,20 +1142,9 @@ def _resolve_selected_bus(
             if value is not None:
                 resolved[key] = str(value)
 
-        # Search results contain the authoritative stops for both full-route
-        # and segment searches, so selecting a bus also selects that segment.
-        if selected.get("boarding_stop_id") and selected.get("dropping_stop_id"):
-            resolved["boarding_stop_id"] = str(selected["boarding_stop_id"])
-            resolved["dropping_stop_id"] = str(selected["dropping_stop_id"])
-            if selected.get("boarding_stop_name"):
-                resolved["boarding_stop_name"] = str(selected["boarding_stop_name"])
-            if selected.get("dropping_stop_name"):
-                resolved["dropping_stop_name"] = str(selected["dropping_stop_name"])
-            if selected.get("fare"):
-                resolved["fare"] = str(selected["fare"])
-            resolved.pop("options_kind", None)
-            resolved.pop("options_fresh", None)
-
+        # Bus selection must keep the route segment unresolved until the
+        # schedule-specific stop list is fetched and the user picks a valid
+        # boarding/dropping pair.
         return resolved
 
     # Explicit ordinal selections such as "first bus" or "option 2".
@@ -1307,19 +1281,24 @@ def _resolve_selected_stops(
         if require_triggers and not any(t in message for t in triggers):
             return None
 
-        # Find all stops that match as whole words in message
+        # Match either the specific stop name or the containing city name.
         matches: list[tuple[dict[str, Any], list[tuple[int, int]]]] = []
         for stop in stops:
-            stop_name = _normalize_selection_text(str(stop.get("stop_name", "")))
-            if not stop_name:
-                continue
-            # Find all span occurrences of stop_name in message using word boundaries
-            spans = [
-                m.span()
-                for m in re.finditer(rf"\b{re.escape(stop_name)}\b", message)
+            candidate_values = [
+                str(stop.get("stop_name", "")),
+                str(stop.get("city", "")),
             ]
-            if spans:
-                matches.append((stop, spans))
+            for value in candidate_values:
+                normalized_value = _normalize_selection_text(value)
+                if not normalized_value:
+                    continue
+                spans = [
+                    m.span()
+                    for m in re.finditer(rf"\b{re.escape(normalized_value)}\b", message)
+                ]
+                if spans:
+                    matches.append((stop, spans))
+                    break
 
         if not matches:
             return None
@@ -1510,33 +1489,6 @@ def resolve_booking_context(
     user_message: str,
 ) -> BookingContext:
     """Resolve only unambiguous human selections from authoritative state."""
-    if (
-        _is_change_stops_request(user_message)
-        and not context.get("hold_id")
-        and not context.get("booking_id")
-        and not context.get("payment_order_id")
-    ):
-        resolved = context.copy()
-        for key in (
-            "boarding_stop_id",
-            "boarding_stop_name",
-            "dropping_stop_id",
-            "dropping_stop_name",
-            "available_seats",
-            "seat_map",
-            "seat_map_segment",
-            "seat_map_fresh",
-            "options_kind",
-            "options_fresh",
-            "seat_id",
-            "seat_number",
-        ):
-            resolved.pop(key, None)
-        if resolved.get("boarding_stops") and resolved.get("dropping_stops"):
-            resolved["options_kind"] = "stops"
-            resolved["options_fresh"] = True
-        return resolved
-
     resolved = _resolve_selected_bus(context, user_message)
     resolved = _resolve_selected_stops(resolved, user_message)
     if any(
@@ -1607,6 +1559,18 @@ def is_hold_expired(context: BookingContext) -> bool:
         return datetime.now(timezone.utc) >= expires_at
     except Exception:
         return False
+
+
+def normalize_gender_display(value: str | None) -> str:
+    if value is None:
+        return ""
+    normalized = str(value).strip().upper()
+    labels = {
+        "MALE": "Male",
+        "FEMALE": "Female",
+        "OTHER": "Other",
+    }
+    return labels.get(normalized, normalized.title())
 
 
 def verify_pending_action_matches_context(
@@ -2801,7 +2765,13 @@ def approval_node(
     dropping_name = args.get("dropping_stop_name", "") or state.get("booking_context", {}).get("dropping_stop_name", "")
 
     bus_desc = f"{operator} ({bus_type})" if bus_type else operator
-    route_desc = f"{origin} to {dest}" if origin and dest else "the selected route"
+    route_desc = (
+        f"{boarding_name} to {dropping_name}"
+        if boarding_name and dropping_name
+        else f"{origin} to {dest}"
+        if origin and dest
+        else "the selected route"
+    )
     date_desc = f" on {travel_date}" if travel_date else ""
     stops_desc = ""
     if boarding_name and dropping_name:
@@ -2822,7 +2792,7 @@ def approval_node(
     elif action == CREATE_BOOKING_ACTION:
         p_name = args.get("passenger_name") or state.get("booking_context", {}).get("passenger_name", "Passenger")
         p_age = args.get("passenger_age") or state.get("booking_context", {}).get("passenger_age", "")
-        p_gender = args.get("passenger_gender") or state.get("booking_context", {}).get("passenger_gender", "")
+        p_gender = normalize_gender_display(args.get("passenger_gender") or state.get("booking_context", {}).get("passenger_gender", ""))
         passenger_desc = f"{p_name} ({p_gender}, Age {p_age})" if p_age and p_gender else p_name
         prompt_message = (
             f"Ready to book Seat {seat_num} on {bus_desc} from {route_desc}{date_desc}.{stops_desc} "

@@ -88,7 +88,8 @@ def test_combined_stop_options_resolve_both_stops_and_use_display_times():
         "boarding_stops": [
             {
                 "stop_id": boarding_id,
-                "stop_name": "Hyderabad",
+                "stop_name": "Ameerpet",
+                "city": "Hyderabad",
                 "sequence_number": 1,
                 "arrival_time": "22:00:00",
                 "departure_time": "22:15:00",
@@ -100,7 +101,8 @@ def test_combined_stop_options_resolve_both_stops_and_use_display_times():
         "dropping_stops": [
             {
                 "stop_id": dropping_id,
-                "stop_name": "Chennai",
+                "stop_name": "Tambaram",
+                "city": "Chennai",
                 "sequence_number": 2,
                 "arrival_time": "01:00:00",
                 "arrival_day_offset": 1,
@@ -129,7 +131,8 @@ def test_combined_stop_options_resolve_both_stops_and_use_display_times():
         "kind": "stops",
         "boarding": [
             {
-                "label": "Hyderabad",
+                "label": "Ameerpet",
+                "city": "Hyderabad",
                 "display_time": "10:15 PM",
                 "sequence_number": 1,
                 "selected": False,
@@ -137,7 +140,8 @@ def test_combined_stop_options_resolve_both_stops_and_use_display_times():
         ],
         "dropping": [
             {
-                "label": "Chennai",
+                "label": "Tambaram",
+                "city": "Chennai",
                 "display_time": "1:00 AM (next day)",
                 "sequence_number": 2,
                 "selected": False,
@@ -186,18 +190,16 @@ def test_stop_pair_resolution_rejects_non_increasing_sequences():
     assert "dropping_stop_id" not in resolved
 
 
-def test_full_route_bus_selection_resolves_search_stops_without_picker():
-    boarding_id = str(uuid4())
-    dropping_id = str(uuid4())
+def test_bus_selection_keeps_stop_pair_unresolved_until_schedule_details_load():
     context: BookingContext = {
         "options_kind": "bus",
         "options_fresh": True,
         "available_schedules": [
             {
-                "schedule_id": str(uuid4()),
-                "boarding_stop_id": boarding_id,
+                "schedule_id": "11111111-1111-1111-1111-111111111111",
+                "boarding_stop_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
                 "boarding_stop_name": "Hyderabad",
-                "dropping_stop_id": dropping_id,
+                "dropping_stop_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
                 "dropping_stop_name": "Bangalore",
                 "route_origin": "Hyderabad",
                 "route_destination": "Bangalore",
@@ -208,73 +210,13 @@ def test_full_route_bus_selection_resolves_search_stops_without_picker():
 
     selected = resolve_booking_context(context, "Select option 1")
 
-    assert selected.get("boarding_stop_id") == boarding_id
-    assert selected.get("dropping_stop_id") == dropping_id
-    assert selected.get("boarding_stop_name") == "Hyderabad"
-    assert selected.get("dropping_stop_name") == "Bangalore"
+    assert selected.get("schedule_id") == "11111111-1111-1111-1111-111111111111"
+    assert selected.get("boarding_stop_id") is None
+    assert selected.get("dropping_stop_id") is None
+    assert "boarding_stop_name" not in selected
+    assert "dropping_stop_name" not in selected
     assert "options_kind" not in selected
     assert "options_fresh" not in selected
-
-
-def test_change_stops_clears_selected_segment_and_shows_picker():
-    context: BookingContext = {
-        "schedule_id": str(uuid4()),
-        "boarding_stop_id": str(uuid4()),
-        "boarding_stop_name": "Hyderabad",
-        "dropping_stop_id": str(uuid4()),
-        "dropping_stop_name": "Bangalore",
-        "boarding_stops": [
-            {
-                "stop_id": str(uuid4()),
-                "stop_name": "Hyderabad",
-                "sequence_number": 1,
-                "departure_time": "08:00:00",
-            },
-            {
-                "stop_id": str(uuid4()),
-                "stop_name": "Kurnool",
-                "sequence_number": 2,
-                "departure_time": "10:00:00",
-            },
-        ],
-        "dropping_stops": [
-            {
-                "stop_id": str(uuid4()),
-                "stop_name": "Bangalore",
-                "sequence_number": 4,
-                "arrival_time": "15:00:00",
-            },
-            {
-                "stop_id": str(uuid4()),
-                "stop_name": "Anantapur",
-                "sequence_number": 3,
-                "arrival_time": "12:00:00",
-            },
-        ],
-        "seat_map": [{"seat_number": "1A"}],
-        "seat_map_segment": "old-segment",
-        "seat_id": str(uuid4()),
-        "seat_number": "1A",
-    }
-
-    resolved = resolve_booking_context(context, "Change stops")
-
-    assert "boarding_stop_id" not in resolved
-    assert "boarding_stop_name" not in resolved
-    assert "dropping_stop_id" not in resolved
-    assert "dropping_stop_name" not in resolved
-    assert "seat_map" not in resolved
-    assert "seat_id" not in resolved
-    assert "seat_number" not in resolved
-    assert resolved.get("options_kind") == "stops"
-    assert resolved.get("options_fresh") is True
-
-    payload, metadata = _build_agent_payload(
-        {"final_response": "Choose your stops below.", "booking_context": resolved},
-        "conversation-id",
-    )
-    assert payload["options"]["kind"] == "stops"
-    assert metadata["options"] == payload["options"]
 
 
 def test_system_prompt_formats_user_facing_currency_with_rupee_symbol():

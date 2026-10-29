@@ -47,6 +47,7 @@ export interface BusSelectionOptionItem {
 
 export interface StopSelectionOptionItem {
   label: string;
+  city?: string | null;
   display_time: string;
   sequence_number: number;
   selected?: boolean;

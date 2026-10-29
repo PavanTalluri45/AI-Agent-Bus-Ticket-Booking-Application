@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 
@@ -10,10 +10,29 @@ def _as_time(value: Any) -> time:
     return time.fromisoformat(str(value))
 
 
-def format_time_display(value: Any, day_offset: Any) -> str:
+def format_date_display(value: Any, day_offset: Any = 0) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, datetime):
+        base_date = value.date()
+    elif isinstance(value, date):
+        base_date = value
+    else:
+        value_str = str(value).strip()
+        if not value_str:
+            return ""
+        base_date = date.fromisoformat(value_str)
+
+    target_date = base_date + timedelta(days=int(day_offset))
+    return f"{target_date.day} {target_date.strftime('%b')}"
+
+
+def format_time_display(value: Any, day_offset: Any, travel_date: Any = None) -> str:
     display = _as_time(value).strftime("%I:%M %p").lstrip("0")
-    if int(day_offset) > 0:
-        display += " (next day)"
+    offset = int(day_offset)
+    if offset > 0 and travel_date is not None:
+        return f"{display}, {format_date_display(travel_date, offset)}"
     return display
 
 

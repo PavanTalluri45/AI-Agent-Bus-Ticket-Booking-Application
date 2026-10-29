@@ -1,7 +1,7 @@
 import json
 import queue
 import threading
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable, Literal
 from uuid import UUID, uuid4
 
@@ -853,10 +853,12 @@ def _build_agent_payload(
                 departure = _format_time_of_day(
                     bus["departure_time"],
                     bus["departure_day_offset"],
+                    bus.get("travel_date"),
                 )
                 arrival = _format_time_of_day(
                     bus["arrival_time"],
                     bus["arrival_day_offset"],
+                    bus.get("travel_date"),
                 )
                 free_seat_count = bus.get(
                     "free_seat_count",
@@ -886,6 +888,7 @@ def _build_agent_payload(
                         "detail": _format_time_of_day(
                             stop[time_key],
                             stop.get(offset_key, stop.get("day_offset", 0)),
+                            booking_ctx.get("travel_date"),
                         ),
                     }
                 )
@@ -980,11 +983,30 @@ def _build_agent_payload(
     return response_payload, msg_metadata
 
 
-def _format_time_of_day(value: Any, day_offset: Any) -> str:
+def _format_date_display(value: Any, day_offset: Any = 0) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, datetime):
+        base_date = value.date()
+    elif isinstance(value, date):
+        base_date = value
+    else:
+        value_str = str(value).strip()
+        if not value_str:
+            return ""
+        base_date = date.fromisoformat(value_str)
+
+    target_date = base_date + timedelta(days=int(day_offset))
+    return f"{target_date.day} {target_date.strftime('%b')}"
+
+
+def _format_time_of_day(value: Any, day_offset: Any, travel_date: Any = None) -> str:
     parsed_time = value if isinstance(value, time) else time.fromisoformat(str(value))
     display = parsed_time.strftime("%I:%M %p").lstrip("0")
-    if int(day_offset) > 0:
-        display += " (next day)"
+    offset = int(day_offset)
+    if offset > 0 and travel_date is not None:
+        return f"{display}, {_format_date_display(travel_date, offset)}"
     return display
 
 

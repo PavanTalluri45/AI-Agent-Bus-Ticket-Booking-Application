@@ -4,7 +4,7 @@ import React, { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Bus, Check, CheckCircle2, Copy, Printer } from "lucide-react";
-import { formatTime12h } from "@/lib/format-time";
+import { formatDateDisplay, formatTime12h } from "@/lib/format-time";
 import type { ConfirmedTicketData } from "@/types/bus-booking";
 
 interface ConfirmedTicketProps {
@@ -42,6 +42,14 @@ function Field({
 
 export function ConfirmedTicket({ ticket, onBookAnother }: ConfirmedTicketProps) {
   const [copied, setCopied] = useState(false);
+
+  const formatGenderDisplay = (value?: string | null) => {
+    const normalized = (value ?? "").trim().toUpperCase();
+    if (normalized === "MALE") return "Male";
+    if (normalized === "FEMALE") return "Female";
+    if (normalized === "OTHER") return "Other";
+    return value ? value : "—";
+  };
 
   const handleCopy = () => {
     if (ticket.booking_reference) {
@@ -123,7 +131,7 @@ export function ConfirmedTicket({ ticket, onBookAnother }: ConfirmedTicketProps)
             </div>
             <div className="mt-0.5 truncate text-xs text-muted-foreground">
               {ticket.boarding_point
-                ? `Boarding: ${ticket.boarding_point}${ticket.boarding_time ? ` · ${formatTime12h(ticket.boarding_time, ticket.boarding_day_offset)}` : ""}`
+                ? `Boarding: ${ticket.boarding_point}${ticket.boarding_time ? ` · ${formatTime12h(ticket.boarding_time, ticket.boarding_day_offset, ticket.travel_date)}` : ""}`
                 : "\u00A0"}
             </div>
           </div>
@@ -147,7 +155,7 @@ export function ConfirmedTicket({ ticket, onBookAnother }: ConfirmedTicketProps)
             </div>
             <div className="mt-0.5 truncate text-xs text-muted-foreground">
               {ticket.dropping_point
-                ? `Dropping: ${ticket.dropping_point}${ticket.dropping_time ? ` · ${formatTime12h(ticket.dropping_time, ticket.dropping_day_offset)}` : ""}`
+                ? `Dropping: ${ticket.dropping_point}${ticket.dropping_time ? ` · ${formatTime12h(ticket.dropping_time, ticket.dropping_day_offset, ticket.travel_date)}` : ""}`
                 : "\u00A0"}
             </div>
           </div>
@@ -155,7 +163,9 @@ export function ConfirmedTicket({ ticket, onBookAnother }: ConfirmedTicketProps)
 
         {/* Trip + passenger share one 4-column grid so columns line up */}
         <div className="grid grid-cols-2 gap-x-4 gap-y-5 border-t border-dashed pt-5 sm:grid-cols-4">
-          <Field label="Travel Date">{ticket.travel_date || "—"}</Field>
+          <Field label="Travel Date">
+            {ticket.travel_date ? formatDateDisplay(ticket.travel_date) : "—"}
+          </Field>
           <Field label="Seat No.">
             <span className="text-emerald-600 dark:text-emerald-400">
               {ticket.seat_number || "—"}
@@ -174,7 +184,7 @@ export function ConfirmedTicket({ ticket, onBookAnother }: ConfirmedTicketProps)
             {ticket.passenger_name || "—"}
           </Field>
           <Field label="Age">{ticket.passenger_age || "—"}</Field>
-          <Field label="Gender">{ticket.passenger_gender || "—"}</Field>
+          <Field label="Gender">{formatGenderDisplay(ticket.passenger_gender)}</Field>
         </div>
 
         {onBookAnother && (

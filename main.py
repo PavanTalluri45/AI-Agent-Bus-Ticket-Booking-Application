@@ -1,7 +1,7 @@
 import json
 import queue
 import threading
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Callable, Literal
 from uuid import UUID, uuid4
 
@@ -443,6 +443,16 @@ LIMIT 1;
 """
 
 
+def _normalize_gender_display(value: Any) -> str:
+    normalized = str(value or "").strip().upper()
+    labels = {
+        "MALE": "Male",
+        "FEMALE": "Female",
+        "OTHER": "Other",
+    }
+    return labels.get(normalized, normalized.title() if normalized else "")
+
+
 def _get_confirmed_ticket_details(booking_id: UUID) -> dict | None:
     try:
         with engine.connect() as connection:
@@ -461,6 +471,8 @@ def _get_confirmed_ticket_details(booking_id: UUID) -> dict | None:
                 data["total_amount"] = str(data["total_amount"])
             if data.get("travel_date") is not None:
                 data["travel_date"] = str(data["travel_date"])
+            if data.get("passenger_gender") is not None:
+                data["passenger_gender"] = _normalize_gender_display(data["passenger_gender"])
             for time_field in ("boarding_time", "dropping_time"):
                 if data.get(time_field) is not None:
                     data[time_field] = str(data[time_field])
@@ -851,10 +863,14 @@ def _build_agent_payload(
                     f"({bus['bus_number']})"
                 )
                 departure = bus.get("departure_display") or _format_time_of_day(
-                    bus["departure_time"], bus["departure_day_offset"]
+                    bus["departure_time"],
+                    bus["departure_day_offset"],
+                    bus.get("travel_date"),
                 )
                 arrival = bus.get("arrival_display") or _format_time_of_day(
-                    bus["arrival_time"], bus["arrival_day_offset"]
+                    bus["arrival_time"],
+                    bus["arrival_day_offset"],
+                    bus.get("travel_date"),
                 )
                 free_seat_count = bus.get(
                     "free_seat_count",
@@ -873,6 +889,7 @@ def _build_agent_payload(
             boarding_items = [
                 {
                     "label": stop["stop_name"],
+                    "city": stop.get("city"),
                     "display_time": stop.get("departure_display")
                     or _format_time_of_day(
                         stop["departure_time"],
@@ -880,6 +897,7 @@ def _build_agent_payload(
                             "departure_day_offset",
                             stop.get("day_offset", 0),
                         ),
+                        booking_ctx.get("travel_date"),
                     ),
                     "sequence_number": stop["sequence_number"],
                     "selected": bool(
@@ -893,6 +911,7 @@ def _build_agent_payload(
             dropping_items = [
                 {
                     "label": stop["stop_name"],
+                    "city": stop.get("city"),
                     "display_time": stop.get("arrival_display")
                     or _format_time_of_day(
                         stop["arrival_time"],
@@ -900,6 +919,7 @@ def _build_agent_payload(
                             "arrival_day_offset",
                             stop.get("day_offset", 0),
                         ),
+                        booking_ctx.get("travel_date"),
                     ),
                     "sequence_number": stop["sequence_number"],
                     "selected": bool(
@@ -1009,10 +1029,31 @@ def _build_agent_payload(
     return response_payload, msg_metadata
 
 
-def _format_time_of_day(value: Any, day_offset: Any) -> str:
+def _format_date_display(value: Any, day_offset: Any = 0) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, datetime):
+        base_date = value.date()
+    elif isinstance(value, date):
+        base_date = value
+    else:
+        value_str = str(value).strip()
+        if not value_str:
+            return ""
+        base_date = date.fromisoformat(value_str)
+
+    target_date = base_date + timedelta(days=int(day_offset))
+    return f"{target_date.day} {target_date.strftime('%b')}"
+
+
+def _format_time_of_day(value: Any, day_offset: Any, travel_date: Any = None) -> str:
     parsed_time = value if isinstance(value, time) else time.fromisoformat(str(value))
     display = parsed_time.strftime("%I:%M %p").lstrip("0")
-    if int(day_offset) > 0:
+    offset = int(day_offset)
+    if offset > 0:
+        if travel_date is not None:
+            return f"{display}, {_format_date_display(travel_date, offset)}"
         display += " (next day)"
     return display
 

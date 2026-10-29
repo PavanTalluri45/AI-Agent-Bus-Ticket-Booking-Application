@@ -61,6 +61,7 @@ SELECT
                 jsonb_build_object(
                     'stop_id', rs.id,
                     'stop_name', rs.stop_name,
+                    'city', rs.city,
                     'sequence_number', rs.sequence_number,
                     'arrival_time', ss.arrival_time,
                     'departure_time', ss.departure_time,
@@ -84,6 +85,7 @@ SELECT
                 jsonb_build_object(
                     'stop_id', rs.id,
                     'stop_name', rs.stop_name,
+                    'city', rs.city,
                     'sequence_number', rs.sequence_number,
                     'arrival_time', ss.arrival_time,
                     'departure_time', ss.departure_time,
@@ -148,10 +150,12 @@ def get_bus_details(request: GetBusDetailsInput) -> dict | None:
                         "arrival_display": format_time_display(
                             stop["arrival_time"],
                             offsets["arrival_day_offset"],
+                            details.get("travel_date"),
                         ),
                         "departure_display": format_time_display(
                             stop["departure_time"],
                             offsets["departure_day_offset"],
+                            details.get("travel_date"),
                         ),
                     }
                 )

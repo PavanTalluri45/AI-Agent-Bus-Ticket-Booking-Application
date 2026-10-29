@@ -90,7 +90,7 @@ export function SelectionOptions({
     isBoarding: boolean,
   ) => (
     <div className="flex min-w-0 flex-1 flex-col gap-2">
-      <h3 className="text-sm font-semibold text-foreground">{label}</h3>
+      <h3 className="text-sm font-semibold text-foreground">{label === "Boarding" ? "Boarding Points" : "Dropping Points"}</h3>
       <div className="flex flex-col gap-2">
         {stops.map((stop, index) => {
           const pairIsInvalid =
@@ -104,7 +104,7 @@ export function SelectionOptions({
             <button
               key={`${stop.sequence_number}-${stop.label}-${index}`}
               type="button"
-              aria-label={`Select ${isBoarding ? "boarding" : "dropping"} stop ${stop.label}, ${stop.display_time}`}
+              aria-label={`Select ${isBoarding ? "boarding" : "dropping"} stop ${stop.label}${stop.city ? ` in ${stop.city}` : ""}, ${stop.display_time}`}
               aria-pressed={selected}
               aria-disabled={pairIsInvalid}
               disabled={!interactive}
@@ -141,6 +141,7 @@ export function SelectionOptions({
             >
               <span className="block text-sm font-medium">{stop.label}</span>
               <span className="mt-0.5 block text-xs text-muted-foreground">
+                {stop.city ? `${stop.city} • ` : ""}
                 {stop.display_time}
               </span>
             </button>
